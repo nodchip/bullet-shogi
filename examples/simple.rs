@@ -73,6 +73,7 @@ fn main() {
         wdl_scheduler: wdl::ConstantWDL { value: 0.75 },
         lr_scheduler: lr::StepLR { start: 0.001, gamma: 0.1, step: 18 },
         save_rate: 10,
+        log_rate: 128,
     };
 
     let settings = LocalSettings {

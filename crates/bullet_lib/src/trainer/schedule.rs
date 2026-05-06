@@ -16,6 +16,7 @@ pub struct TrainingSchedule<LR: LrScheduler, WDL: WdlScheduler> {
     pub wdl_scheduler: WDL,
     pub lr_scheduler: LR,
     pub save_rate: usize,
+    pub log_rate: usize,
 }
 
 impl<LR: LrScheduler, WDL: WdlScheduler> TrainingSchedule<LR, WDL> {
@@ -40,6 +41,7 @@ impl<LR: LrScheduler, WDL: WdlScheduler> TrainingSchedule<LR, WDL> {
         self.steps.display();
         println!("Eval Scale             : {}", ansi(format!("{:.0}", self.eval_scale), 31));
         println!("Save Rate              : {}", ansi(self.save_rate, 31));
+        println!("Log Rate               : {}", ansi(self.log_rate, 31));
         println!("WDL Scheduler          : {}", self.wdl_scheduler.colourful());
         println!("LR Scheduler           : {}", self.lr_scheduler.colourful());
     }

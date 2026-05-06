@@ -113,6 +113,15 @@ enum LayerStackOutputFormat {
     TanukiSfnnwoP1536,
 }
 
+fn parse_nonzero_usize(text: &str) -> Result<usize, String> {
+    let value = text.parse::<usize>().map_err(|e| format!("invalid unsigned integer '{text}': {e}"))?;
+    if value == 0 {
+        Err("value must be 1 or greater".to_string())
+    } else {
+        Ok(value)
+    }
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "shogi_layerstack")]
 #[command(about = "Shogi LayerStack NNUE training script")]
@@ -164,6 +173,10 @@ struct Args {
     /// Save interval (superbatches)
     #[arg(long, default_value = "10")]
     save_rate: usize,
+
+    /// Progress display interval in batches
+    #[arg(long, default_value = "128", value_parser = parse_nonzero_usize)]
+    log_rate: usize,
 
     /// Number of threads
     #[arg(long, default_value = "4")]
@@ -1781,6 +1794,7 @@ fn main() {
         wdl_scheduler,
         lr_scheduler: lr::StepLR { start: args.lr, gamma: args.lr_gamma, step: args.lr_step },
         save_rate: args.save_rate,
+        log_rate: args.log_rate,
     };
 
     // resume の場合は experiment_id を引き継ぐ。on_checkpoint_saved closure が
@@ -2179,6 +2193,20 @@ mod tests {
         let args = Args::parse_from(["shogi_layerstack", "--no-color"]);
 
         assert!(args.no_color);
+    }
+
+    #[test]
+    fn test_log_rate_flag_is_parsed() {
+        let args = Args::parse_from(["shogi_layerstack", "--log-rate", "64"]);
+
+        assert_eq!(args.log_rate, 64);
+    }
+
+    #[test]
+    fn test_log_rate_must_be_nonzero() {
+        let err = Args::try_parse_from(["shogi_layerstack", "--log-rate", "0"]).unwrap_err();
+
+        assert!(err.to_string().contains("1 or greater"));
     }
 
     #[test]

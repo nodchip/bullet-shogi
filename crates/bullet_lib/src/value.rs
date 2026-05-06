@@ -156,7 +156,7 @@ where
         self.train_custom(
             trainer::schedule::TrainingSchedule {
                 steps,
-                log_rate: 128,
+                log_rate: schedule.log_rate,
                 lr_schedule: Box::new(|a, b| lr_scheduler.lr(a, b)),
             },
             ValueDataLoader { steps, threads: settings.threads, dataloader, wdl: schedule.wdl_scheduler.clone() },
