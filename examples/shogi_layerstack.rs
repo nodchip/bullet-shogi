@@ -1,8 +1,8 @@
 /*
 Shogi LayerStack NNUE Training Script
 
-LayerStacks (SFNNwoPSQT-1536) アーキテクチャの学習スクリプト。
-rshogi 互換の量子化ファイル (quantised.bin) を出力する。
+LayerStacks (SFNNwoP1536 progress) アーキテクチャの学習スクリプト。
+tanuki-wcsc36-engine.shogitest.sfnnwoP1536.progress 互換の量子化ファイル (quantised.bin) を出力する。
 
 Usage:
     cargo run --release --example shogi_layerstack -- [OPTIONS]
@@ -47,7 +47,7 @@ use bullet_lib::{
     game::outputs::{
         SHOGI_PLY_BUCKET9_DEFAULT_BOUNDS, SHOGI_PROGRESS_GIKOU_LITE_FEATURE_ORDER,
         SHOGI_PROGRESS_GIKOU_LITE_NUM_FEATURES, SHOGI_PROGRESS8_FEATURE_ORDER, SHOGI_PROGRESS8_NUM_FEATURES,
-        ShogiLayerStackBucket9, ShogiProgressBucket8, ShogiProgressBucket8GikouLite, ShogiProgressKPAbs,
+        ShogiProgressBucket8, ShogiProgressBucket8GikouLite, ShogiProgressKPAbs,
     },
     nn::{
         Affine, BackendMarker, InitSettings, NetworkBuilderNode, Shape,
@@ -67,7 +67,7 @@ use serde::{Deserialize, Serialize};
 // Constants
 // =============================================================================
 
-const NUM_BUCKETS: usize = 9;
+const NUM_BUCKETS: usize = 8;
 const QA: i16 = 127;
 const QB: i16 = 64;
 
@@ -91,7 +91,7 @@ enum OptimizerType {
     Ranger,
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum, Default)]
+#[derive(Debug, Clone, Copy, ValueEnum, Default, PartialEq, Eq)]
 enum BucketMode {
     #[default]
     Kingrank9,
@@ -101,6 +101,16 @@ enum BucketMode {
     Progress8Gikou,
     #[value(name = "progress8kpabs")]
     Progress8KPAbs,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, Default, PartialEq, Eq)]
+enum LayerStackOutputFormat {
+    /// rshogi NetworkLayerStacks 互換フォーマット
+    #[default]
+    Rshogi,
+    /// hakubishin-private tanuki-wcsc36-engine.shogitest.sfnnwoP1536.progress 互換フォーマット
+    #[value(name = "tanuki-sfnnwop1536")]
+    TanukiSfnnwoP1536,
 }
 
 #[derive(Parser, Debug)]
@@ -279,6 +289,10 @@ struct Args {
     /// Progress parameter path: coeff JSON for progress8/progress8gikou, progress.bin for progress8kpabs
     #[arg(long)]
     progress_coeff: Option<PathBuf>,
+
+    /// Quantised eval output format
+    #[arg(long, value_enum, default_value = "tanuki-sfnnwop1536")]
+    output_format: LayerStackOutputFormat,
 }
 
 #[derive(Debug, Deserialize)]
@@ -318,7 +332,7 @@ struct ProgressCoeffV2 {
 }
 
 // `OutputBuckets` implementations stay `Copy`, so boxing the large variants is not an option.
-#[allow(clippy::large_enum_variant)]
+#[allow(clippy::large_enum_variant, dead_code)]
 #[derive(Clone, Copy)]
 enum LoadedProgressBucket {
     V1(ShogiProgressBucket8),
@@ -1040,6 +1054,89 @@ fn compute_layerstack_fc_hash(l1_out: usize, l2_in: usize, l2_out: usize) -> u32
     prev_hash
 }
 
+struct LayerStackFormatConstants {
+    nnue_version: u32,
+    network_hash: u32,
+    ft_hash: u32,
+    fc_hash: u32,
+    serialized_buckets: usize,
+    architecture: String,
+}
+
+fn layerstack_format_constants(
+    output_format: LayerStackOutputFormat,
+    ft_out: usize,
+    l1_out: usize,
+    l2_out: usize,
+    arch_desc: String,
+) -> LayerStackFormatConstants {
+    use bullet_lib::game::inputs::FEATURE_HASH_HM_V2;
+
+    match output_format {
+        LayerStackOutputFormat::Rshogi => {
+            let l1_effective = l1_out - 1;
+            let l2_in = l1_effective * 2;
+            let fc_hash = compute_layerstack_fc_hash(ft_out, l2_in, l2_out);
+            let ft_hash = FEATURE_HASH_HM_V2 ^ ((ft_out * 2) as u32);
+            let network_hash = fc_hash ^ ft_hash;
+            LayerStackFormatConstants {
+                nnue_version: 0x7AF32F20,
+                network_hash,
+                ft_hash,
+                fc_hash,
+                serialized_buckets: NUM_BUCKETS,
+                architecture: arch_desc,
+            }
+        }
+        LayerStackOutputFormat::TanukiSfnnwoP1536 => LayerStackFormatConstants {
+            nnue_version: 0x7AF32F16,
+            network_hash: 0x3c203b32,
+            ft_hash: 0x5f134ab8,
+            fc_hash: 0x6333718A,
+            serialized_buckets: 8,
+            architecture: "Network trained with https://github.com/official-stockfish/nnue-pytorch".to_string(),
+        },
+    }
+}
+
+fn validate_layerstack_output_format(
+    output_format: LayerStackOutputFormat,
+    bucket_mode: BucketMode,
+    input_size: usize,
+    halfka_dim: usize,
+    ft_out: usize,
+    l1_out: usize,
+    l2_out: usize,
+    psqt: bool,
+    threat_profile: Option<ThreatProfile>,
+    hand_threat: bool,
+    hand_count_dense_dims: usize,
+) -> Result<(), String> {
+    if output_format != LayerStackOutputFormat::TanukiSfnnwoP1536 {
+        return Ok(());
+    }
+
+    if input_size != halfka_dim {
+        return Err("tanuki-sfnnwop1536 output supports only plain HalfKA_hm input".to_string());
+    }
+    if (ft_out, l1_out, l2_out) != (1536, 16, 32) {
+        return Err(format!(
+            "tanuki-sfnnwop1536 output requires --l0 1536 --l1 16 --l2 32 (got --l0 {ft_out} --l1 {l1_out} --l2 {l2_out})"
+        ));
+    }
+    if bucket_mode != BucketMode::Progress8KPAbs {
+        return Err("tanuki-sfnnwop1536 output requires --bucket-mode progress8kpabs".to_string());
+    }
+    if psqt || threat_profile.is_some() || hand_threat || hand_count_dense_dims > 0 {
+        return Err(
+            "tanuki-sfnnwop1536 output does not support --psqt/--threat/--hand-threat/--hand-threat-defensive/--hand-count-dense"
+                .to_string(),
+        );
+    }
+
+    Ok(())
+}
+
 // =============================================================================
 // SavedFormat Construction
 // =============================================================================
@@ -1063,16 +1160,10 @@ fn build_layerstack_save_format(
     threat_profile: Option<ThreatProfile>,
     hand_threat: bool,
     hand_count_dense_dims: usize,
+    output_format: LayerStackOutputFormat,
 ) -> Vec<SavedFormat> {
-    use bullet_lib::game::inputs::FEATURE_HASH_HM_V2;
-
     let l1_effective = l1_out - 1; // skip connection 分を除く
     let l2_in = l1_effective * 2; // sqr_crelu concat crelu
-
-    // nnue-pytorch 互換ハッシュ計算
-    let fc_hash = compute_layerstack_fc_hash(ft_out, l2_in, l2_out);
-    let ft_hash = FEATURE_HASH_HM_V2 ^ ((ft_out * 2) as u32);
-    let network_hash = fc_hash ^ ft_hash;
 
     // アーキテクチャ文字列（fv_scale を埋め込み、rshogi が推論時に正しく解釈できるようにする）
     let psqt_part = if psqt { format!("PSQT={},", NUM_BUCKETS) } else { String::new() };
@@ -1128,18 +1219,18 @@ fn build_layerstack_save_format(
         ft_out * 2,
         fv_scale,
     );
-    let arch_bytes = arch_desc.as_bytes();
+    let format = layerstack_format_constants(output_format, ft_out, l1_out, l2_out, arch_desc);
+    let arch_bytes = format.architecture.as_bytes();
 
     // ---- ヘッダー ----
-    let nnue_version: u32 = 0x7AF32F20;
     let mut header = Vec::new();
-    header.extend_from_slice(&nnue_version.to_le_bytes());
-    header.extend_from_slice(&network_hash.to_le_bytes());
+    header.extend_from_slice(&format.nnue_version.to_le_bytes());
+    header.extend_from_slice(&format.network_hash.to_le_bytes());
     header.extend_from_slice(&(arch_bytes.len() as u32).to_le_bytes());
     header.extend_from_slice(arch_bytes);
 
     // ---- FT hash ----
-    let ft_hash_bytes = ft_hash.to_le_bytes().to_vec();
+    let ft_hash_bytes = format.ft_hash.to_le_bytes().to_vec();
 
     // ---- FT biases + weights (LEB128 圧縮, YO 互換 2ブロック形式) ----
     // biases / weights を別々の LEB128 ブロックで出力。
@@ -1295,7 +1386,8 @@ fn build_layerstack_save_format(
     let l2_out_captured = l2_out;
     let l2_in_captured = l2_in;
     let ft_out_for_ls = ft_out;
-    let fc_hash_captured = fc_hash;
+    let fc_hash_captured = format.fc_hash;
+    let serialized_buckets = format.serialized_buckets;
     let hand_count_dense_dims_captured = hand_count_dense_dims;
     let layerstack_data = SavedFormat::empty()
         .transform(move |graph, _| {
@@ -1313,7 +1405,7 @@ fn build_layerstack_save_format(
 
             let mut output_bytes: Vec<u8> = Vec::new();
 
-            for bucket in 0..NUM_BUCKETS {
+            for bucket in 0..serialized_buckets {
                 // fc_hash per bucket
                 output_bytes.extend_from_slice(&fc_hash_captured.to_le_bytes());
 
@@ -1605,6 +1697,23 @@ fn main() {
     println!("Data: {}", args.data);
     println!("======================================");
 
+    if let Err(e) = validate_layerstack_output_format(
+        args.output_format,
+        args.bucket_mode,
+        input_size,
+        halfka_dim,
+        ft_out,
+        l1_out,
+        l2_out,
+        args.psqt,
+        threat_profile,
+        use_hand_threat || use_hand_threat_defensive,
+        hand_count_dense_dims,
+    ) {
+        eprintln!("ERROR: {e}");
+        std::process::exit(1);
+    }
+
     // Experiment context
     let experiment_params = ExperimentParams {
         architecture: format!("LayerStack-{}-{}-{}", ft_out, l1_out, l2_out),
@@ -1727,6 +1836,7 @@ fn main() {
         threat_profile,
         save_format_hand_threat,
         hand_count_dense_dims,
+        args.output_format,
     );
 
     // Network builder
@@ -1737,20 +1847,14 @@ fn main() {
     let l2_in_c = l2_in;
     let use_psqt = args.psqt;
     let bucket_impl = match args.bucket_mode {
-        BucketMode::Kingrank9 => ShogiLayerStackBucket9::KingRank9,
-        BucketMode::Ply9 => ShogiLayerStackBucket9::Ply9(ply_bounds.expect("ply bounds must exist in ply9 mode")),
-        BucketMode::Progress8 => match progress_bucket {
-            Some(LoadedProgressBucket::V1(bucket)) => ShogiLayerStackBucket9::Progress8(bucket),
-            _ => panic!("progress coeff v1 must exist in progress8 mode"),
-        },
-        BucketMode::Progress8Gikou => match progress_bucket {
-            Some(LoadedProgressBucket::Gikou(bucket)) => ShogiLayerStackBucket9::Progress8GikouLite(bucket),
-            _ => panic!("progress coeff v2 must exist in progress8gikou mode"),
-        },
         BucketMode::Progress8KPAbs => match progress_bucket {
-            Some(LoadedProgressBucket::KPAbs(bucket)) => ShogiLayerStackBucket9::Progress8KPAbs(bucket),
+            Some(LoadedProgressBucket::KPAbs(bucket)) => bucket,
             _ => panic!("progress.bin must exist in progress8kpabs mode"),
         },
+        _ => {
+            eprintln!("ERROR: tanuki-sfnnwop1536 training requires --bucket-mode progress8kpabs");
+            std::process::exit(1);
+        }
     };
 
     type Nbn<'a> = NetworkBuilderNode<'a, BackendMarker>;
@@ -2024,6 +2128,45 @@ mod tests {
         assert_eq!(pad32(32), 32);
         assert_eq!(pad32(1), 32);
         assert_eq!(pad32(33), 64);
+    }
+
+    #[test]
+    fn test_tanuki_sfnnwop1536_format_constants() {
+        assert_eq!(NUM_BUCKETS, 8);
+
+        let format = layerstack_format_constants(
+            LayerStackOutputFormat::TanukiSfnnwoP1536,
+            1536,
+            16,
+            32,
+            "ignored for tanuki".to_string(),
+        );
+
+        assert_eq!(format.nnue_version, 0x7AF32F16);
+        assert_eq!(format.network_hash, 0x3c203b32);
+        assert_eq!(format.ft_hash, 0x5f134ab8);
+        assert_eq!(format.fc_hash, 0x6333718A);
+        assert_eq!(format.serialized_buckets, 8);
+        assert_eq!(format.architecture, "Network trained with https://github.com/official-stockfish/nnue-pytorch");
+    }
+
+    #[test]
+    fn test_tanuki_sfnnwop1536_requires_progress8kpabs_bucket_mode() {
+        let result = validate_layerstack_output_format(
+            LayerStackOutputFormat::TanukiSfnnwoP1536,
+            BucketMode::Kingrank9,
+            ShogiHalfKA_hm.num_inputs(),
+            ShogiHalfKA_hm.num_inputs(),
+            1536,
+            16,
+            32,
+            false,
+            None,
+            false,
+            0,
+        );
+
+        assert!(result.unwrap_err().contains("--bucket-mode progress8kpabs"));
     }
 
     #[test]
