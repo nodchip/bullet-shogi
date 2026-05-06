@@ -8,17 +8,24 @@ use std::{
 use super::schedule::TrainingSteps;
 
 static CBCS: AtomicBool = AtomicBool::new(false);
+static COLOURS_ENABLED: AtomicBool = AtomicBool::new(true);
 
 pub fn ansi<T: Display, U: Display>(x: T, y: U) -> String {
-    format!("\x1b[{y}m{x}\x1b[0m{}", esc())
+    if COLOURS_ENABLED.load(SeqCst) { format!("\x1b[{y}m{x}\x1b[0m{}", esc()) } else { x.to_string() }
 }
 
 pub fn set_colour<U: Display>(x: U) {
-    print!("\x1b[{x}m");
+    if COLOURS_ENABLED.load(SeqCst) {
+        print!("\x1b[{x}m");
+    }
 }
 
 pub fn clear_colours() {
     print!("{}", esc());
+}
+
+pub fn set_colours_enabled(val: bool) {
+    COLOURS_ENABLED.store(val, SeqCst)
 }
 
 pub fn set_cbcs(val: bool) {
@@ -30,7 +37,11 @@ pub fn num_cs() -> i32 {
 }
 
 fn esc() -> &'static str {
-    if CBCS.load(SeqCst) { "\x1b[38;5;225m" } else { "" }
+    if COLOURS_ENABLED.load(SeqCst) && CBCS.load(SeqCst) { "\x1b[38;5;225m" } else { "" }
+}
+
+fn progress_line_suffix() -> &'static str {
+    if COLOURS_ENABLED.load(SeqCst) { "\x1b[F" } else { "" }
 }
 
 pub fn report_superbatch_progress(
@@ -49,13 +60,14 @@ pub fn report_superbatch_progress(
 
     print!(
         "superbatch {} [{}% ({}/{} batches, {} pos/sec)]\n\
-        Estimated time to end of superbatch: {}s     \x1b[F",
+        Estimated time to end of superbatch: {}s     {}",
         ansi(superbatch, num_cs),
         ansi(format!("{:.1}", pct * 100.0), 35),
         ansi(finished_batches, num_cs),
         ansi(batches, num_cs),
         ansi(format!("{pos_per_sec:.0}"), num_cs),
         ansi(format!("{seconds:.1}"), num_cs),
+        progress_line_suffix(),
     );
     let _ = stdout().flush();
 }
@@ -104,4 +116,18 @@ pub fn seconds_to_hms(mut seconds: u32) -> (u32, u32, u32) {
     minutes -= hours * 60;
 
     (hours, minutes, seconds)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ansi_omits_escape_sequences_when_colours_are_disabled() {
+        set_colours_enabled(false);
+
+        assert_eq!(ansi("value", 31), "value");
+
+        set_colours_enabled(true);
+    }
 }

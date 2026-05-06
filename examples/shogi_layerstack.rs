@@ -293,6 +293,10 @@ struct Args {
     /// Quantised eval output format
     #[arg(long, value_enum, default_value = "tanuki-sfnnwop1536")]
     output_format: LayerStackOutputFormat,
+
+    /// Disable ANSI colour output
+    #[arg(long)]
+    no_color: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1543,6 +1547,7 @@ fn build_layerstack_save_format(
 
 fn main() {
     let args = Args::parse();
+    bullet_lib::acyclib::trainer::logger::set_colours_enabled(!args.no_color);
     args.validate_wrm_settings().unwrap_or_else(|e| {
         eprintln!("ERROR: {}", e);
         std::process::exit(1);
@@ -2167,6 +2172,13 @@ mod tests {
         );
 
         assert!(result.unwrap_err().contains("--bucket-mode progress8kpabs"));
+    }
+
+    #[test]
+    fn test_no_color_flag_is_parsed() {
+        let args = Args::parse_from(["shogi_layerstack", "--no-color"]);
+
+        assert!(args.no_color);
     }
 
     #[test]
