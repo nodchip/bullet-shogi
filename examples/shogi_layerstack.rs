@@ -37,7 +37,10 @@ Options:
     --threat            Enable Threat concatenated input (placeholder)
 */
 
-use std::{path::PathBuf, sync::OnceLock};
+use std::{
+    path::{Path, PathBuf},
+    sync::OnceLock,
+};
 
 use bullet_lib::{
     game::inputs::{
@@ -232,7 +235,7 @@ struct Args {
 
     /// Resume from checkpoint
     #[arg(long)]
-    resume: Option<PathBuf>,
+    resume: Option<String>,
 
     /// Only re-quantise checkpoint
     #[arg(long)]
@@ -358,6 +361,10 @@ enum LoadedProgressBucket {
 }
 
 impl Args {
+    fn resume_path(&self) -> Option<&Path> {
+        self.resume.as_deref().filter(|path| !path.is_empty()).map(Path::new)
+    }
+
     fn wdl_value(&self) -> f32 {
         self.wdl.unwrap_or(0.5)
     }
@@ -1799,7 +1806,7 @@ fn main() {
 
     // resume の場合は experiment_id を引き継ぐ。on_checkpoint_saved closure が
     // experiment_ctx を不変借用する前に行う必要がある。
-    if !args.quantise_only && args.resume.is_some() {
+    if !args.quantise_only && args.resume_path().is_some() {
         experiment_ctx.inherit_resume_experiment_id();
     }
 
@@ -1820,7 +1827,7 @@ fn main() {
 
     // Data loader
     let data_files_owned: Vec<String> = if args.quantise_only {
-        let resume_path = args.resume.as_ref().expect("--quantise-only requires --resume");
+        let resume_path = args.resume_path().expect("--quantise-only requires --resume");
         let quantised = resume_path.join("quantised.bin");
         if quantised.exists() {
             vec![quantised.to_str().unwrap().to_string()]
@@ -2001,7 +2008,7 @@ fn main() {
     macro_rules! maybe_run_or_quantise {
         ($trainer:expr) => {{
             if args.quantise_only {
-                let resume_path = args.resume.as_ref().expect("--quantise-only requires --resume");
+                let resume_path = args.resume_path().expect("--quantise-only requires --resume");
                 let resume_str = resume_path.to_str().unwrap();
                 println!("Loading checkpoint from {}...", resume_str);
                 $trainer.load_from_checkpoint(resume_str);
@@ -2014,7 +2021,7 @@ fn main() {
                 $trainer.save_quantised(&output_path).expect("Failed to save quantised weights");
                 println!("Done!");
             } else {
-                if let Some(ref resume_path) = args.resume {
+                if let Some(resume_path) = args.resume_path() {
                     let resume_str = resume_path.to_str().unwrap();
                     println!("Resuming from checkpoint: {}", resume_str);
                     $trainer.load_from_checkpoint(resume_str);
@@ -2207,6 +2214,20 @@ mod tests {
         let err = Args::try_parse_from(["shogi_layerstack", "--log-rate", "0"]).unwrap_err();
 
         assert!(err.to_string().contains("1 or greater"));
+    }
+
+    #[test]
+    fn test_empty_resume_is_treated_as_absent() {
+        let args = Args::parse_from(["shogi_layerstack", "--resume", ""]);
+
+        assert!(args.resume_path().is_none());
+    }
+
+    #[test]
+    fn test_nonempty_resume_is_kept() {
+        let args = Args::parse_from(["shogi_layerstack", "--resume", "checkpoints/tanuki-10"]);
+
+        assert_eq!(args.resume_path(), Some(Path::new("checkpoints/tanuki-10")));
     }
 
     #[test]
