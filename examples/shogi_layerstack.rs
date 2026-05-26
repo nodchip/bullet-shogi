@@ -73,6 +73,7 @@ use serde::{Deserialize, Serialize};
 const NUM_BUCKETS: usize = 8;
 const QA: i16 = 127;
 const QB: i16 = 64;
+const LOSS_POWER: f32 = 2.5;
 
 #[derive(Debug, Clone, Copy)]
 struct WrmLossParams {
@@ -1894,12 +1895,12 @@ fn main() {
         let q = ((scorenet.copy() - offset) / params.in_scaling).sigmoid();
         let qm = ((-scorenet - offset) / params.in_scaling).sigmoid();
         let qf = (1.0 + q - qm) * 0.5;
-        qf.squared_error(target)
+        qf.power_error(target, LOSS_POWER)
     }
 
     /// Loss function: standard sigmoid
     fn loss_fn_sigmoid<'a>(output: Nbn<'a>, target: Nbn<'a>) -> Nbn<'a> {
-        output.sigmoid().squared_error(target)
+        output.sigmoid().power_error(target, LOSS_POWER)
     }
 
     let loss_fn: for<'a> fn(Nbn<'a>, Nbn<'a>) -> Nbn<'a> = if let Some(in_scaling) = args.wrm_in_scaling {
@@ -2154,6 +2155,11 @@ mod tests {
         assert_eq!(pad32(32), 32);
         assert_eq!(pad32(1), 32);
         assert_eq!(pad32(33), 64);
+    }
+
+    #[test]
+    fn test_loss_power_matches_nnue_pytorch_default() {
+        assert_eq!(LOSS_POWER, 2.5);
     }
 
     #[test]
