@@ -12,21 +12,21 @@ use std::{
 use crate::{
     dag::NodeId,
     device::{
-        Device,
         function::Reduce,
         multi::{MultiDevice, MultiDeviceComm},
-        tensor::Shape,
+        tensor::{rng, Shape},
+        Device,
     },
     graph::{
-        Graph, GraphNodeId, GraphNodeIdTy,
         ir::{
-            BackendMarker, GraphIRManager,
             operation::{
-                GraphIROperationCompilable, binary::Select, sparse::SparseAffineActivate, unary::ReduceAcrossBatch,
+                binary::Select, sparse::SparseAffineActivate, unary::ReduceAcrossBatch, GraphIROperationCompilable,
             },
             passes::GraphIRPass,
+            BackendMarker, GraphIRManager,
         },
         multi::MultiDeviceGraph,
+        Graph, GraphNodeId, GraphNodeIdTy,
     },
 };
 
@@ -35,6 +35,7 @@ pub enum InitSettings {
     Zeroed,
     Normal { mean: f32, stdev: f32 },
     Uniform { mean: f32, stdev: f32 },
+    RepeatedUniform { mean: f32, stdev: f32, rows_per_bucket: usize, buckets: usize },
 }
 
 #[derive(Default)]
@@ -183,6 +184,21 @@ where
                     .dense_mut()
                     .seed_random(mean, stdev, false)
                     .unwrap(),
+                InitSettings::RepeatedUniform { mean, stdev, rows_per_bucket, buckets } => {
+                    let weights =
+                        graph.get(GraphNodeId::new(graph.weight_idx(id).unwrap(), GraphNodeIdTy::Values)).unwrap();
+                    let mut weights = weights.dense_mut();
+                    let size = weights.size();
+                    let repeated_rows = rows_per_bucket * buckets;
+                    assert_eq!(size % repeated_rows, 0, "RepeatedUniform tensor size must divide by repeated rows");
+                    let cols = size / repeated_rows;
+                    let bucket_values = rng::vec_f32(rows_per_bucket * cols, mean, stdev, false);
+                    let mut values = Vec::with_capacity(size);
+                    for _ in 0..buckets {
+                        values.extend_from_slice(&bucket_values);
+                    }
+                    weights.load_from_slice(None, &values).unwrap();
+                }
             };
         }
 

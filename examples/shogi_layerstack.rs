@@ -48,20 +48,20 @@ use bullet_lib::{
         ShogiHalfKaHmThreat, SparseInputType, ThreatProfile,
     },
     game::outputs::{
-        SHOGI_PLY_BUCKET9_DEFAULT_BOUNDS, SHOGI_PROGRESS_GIKOU_LITE_FEATURE_ORDER,
-        SHOGI_PROGRESS_GIKOU_LITE_NUM_FEATURES, SHOGI_PROGRESS8_FEATURE_ORDER, SHOGI_PROGRESS8_NUM_FEATURES,
-        ShogiProgressBucket8, ShogiProgressBucket8GikouLite, ShogiProgressKPAbs,
+        ShogiProgressBucket8, ShogiProgressBucket8GikouLite, ShogiProgressKPAbs, SHOGI_PLY_BUCKET9_DEFAULT_BOUNDS,
+        SHOGI_PROGRESS8_FEATURE_ORDER, SHOGI_PROGRESS8_NUM_FEATURES, SHOGI_PROGRESS_GIKOU_LITE_FEATURE_ORDER,
+        SHOGI_PROGRESS_GIKOU_LITE_NUM_FEATURES,
     },
     nn::{
-        Affine, BackendMarker, InitSettings, NetworkBuilderNode, Shape,
         optimiser::{self, AdamWParams, RAdamParams, RangerParams},
+        Affine, BackendMarker, InitSettings, NetworkBuilderNode, Shape,
     },
     trainer::{
         save::SavedFormat,
-        schedule::{TrainingSchedule, TrainingSteps, lr, wdl},
+        schedule::{lr, wdl, TrainingSchedule, TrainingSteps},
         settings::LocalSettings,
     },
-    value::{ValueTrainerBuilder, loader::DirectSequentialDataLoader},
+    value::{loader::DirectSequentialDataLoader, ValueTrainerBuilder},
 };
 use clap::{Parser, ValueEnum};
 use serde::{Deserialize, Serialize};
@@ -124,6 +124,18 @@ fn parse_nonzero_usize(text: &str) -> Result<usize, String> {
     } else {
         Ok(value)
     }
+}
+
+fn nnue_pytorch_uniform_init_for_fan_in(fan_in: usize) -> InitSettings {
+    InitSettings::Uniform { mean: 0.0, stdev: (1.0 / fan_in as f32).sqrt() }
+}
+
+fn nnue_pytorch_repeated_uniform_init_for_fan_in(
+    fan_in: usize,
+    rows_per_bucket: usize,
+    buckets: usize,
+) -> InitSettings {
+    InitSettings::RepeatedUniform { mean: 0.0, stdev: (1.0 / fan_in as f32).sqrt(), rows_per_bucket, buckets }
 }
 
 #[derive(Parser, Debug)]
@@ -272,6 +284,10 @@ struct Args {
     #[arg(long, default_value_t = false)]
     psqt: bool,
 
+    /// Use nnue-pytorch-compatible parameter initialisation
+    #[arg(long, default_value_t = false)]
+    nnue_pytorch_init: bool,
+
     /// Enable Threat concatenated input
     #[arg(long, default_value_t = false)]
     threat: bool,
@@ -403,7 +419,11 @@ impl Args {
     }
 
     fn interleave_batches_value(&self) -> Option<usize> {
-        if self.interleave_file_batches == 0 { None } else { Some(self.interleave_file_batches) }
+        if self.interleave_file_batches == 0 {
+            None
+        } else {
+            Some(self.interleave_file_batches)
+        }
     }
 
     fn validate_wrm_settings(&self) -> Result<(), String> {
@@ -683,6 +703,7 @@ struct ExperimentParams {
     scale: i32,
     weight_decay: f32,
     win_rate_model: bool,
+    nnue_pytorch_init: bool,
     optimizer: String,
     qa: i16,
     qb: i16,
@@ -1653,6 +1674,7 @@ fn main() {
         ft_out, l1_out, l1_effective, l2_out
     );
     println!("L2 input: {} (sqr_crelu concat crelu)", l2_in);
+    println!("NNUE-pytorch init: {}", if args.nnue_pytorch_init { "enabled" } else { "disabled" });
     println!("PSQT shortcut: {}", if args.psqt { "enabled" } else { "disabled" });
     println!(
         "Threat: {}",
@@ -1766,6 +1788,7 @@ fn main() {
         scale: args.scale,
         weight_decay: args.weight_decay,
         win_rate_model: args.win_rate_model,
+        nnue_pytorch_init: args.nnue_pytorch_init,
         optimizer: optimizer_name.to_string(),
         qa: QA,
         qb: QB,
@@ -1930,27 +1953,97 @@ fn main() {
             }
             builder.build(|builder, stm_inputs, ntm_inputs, output_buckets| {
                 // L0 (Feature Transformer)
-                let l0 = builder.new_affine("l0", input_size, ft_out_c);
-                l0.init_with_effective_input_size(32);
+                let l0 = if args.nnue_pytorch_init {
+                    Affine {
+                        weights: builder.new_weights(
+                            "l0w",
+                            Shape::new(ft_out_c, input_size),
+                            nnue_pytorch_uniform_init_for_fan_in(input_size),
+                        ),
+                        bias: builder.new_weights(
+                            "l0b",
+                            Shape::new(ft_out_c, 1),
+                            nnue_pytorch_uniform_init_for_fan_in(input_size),
+                        ),
+                    }
+                } else {
+                    let l0 = builder.new_affine("l0", input_size, ft_out_c);
+                    l0.init_with_effective_input_size(32);
+                    l0
+                };
 
                 // L1 入力次元: FT 出力 + （HandCount Dense 有効時は +14）
                 let l1_in_total = ft_out_c + hand_count_dense_dims;
 
                 // LayerStack layers:
-                // - l1: bucket-specific delta (zero init). 入力は [FT 出力 (ft_out_c) | HandCount (14)]
-                //   を concat した全体 (l1_in_total) 次元。
-                // - l1f: shared factorized part。FT 出力 (ft_out_c) のみに作用（HandCount は共有しない）
-                let l1 = Affine {
-                    weights: builder.new_weights(
-                        "l1w",
-                        Shape::new(NUM_BUCKETS * l1_out_c, l1_in_total),
-                        InitSettings::Zeroed,
-                    ),
-                    bias: builder.new_weights("l1b", Shape::new(NUM_BUCKETS * l1_out_c, 1), InitSettings::Zeroed),
+                // - 既定: l1 は bucket-specific delta をゼロ初期化し、l1f を共有成分として乱数初期化する。
+                // - --nnue-pytorch-init: nnue-pytorch に合わせ、l1 を bucket 0 繰り返し乱数初期化、
+                //   l1f をゼロ初期化する。
+                // 入力は [FT 出力 (ft_out_c) | HandCount (14)] を concat した全体
+                // (l1_in_total) 次元。l1f は FT 出力 (ft_out_c) のみに作用（HandCount は共有しない）。
+                let l1 = if args.nnue_pytorch_init {
+                    Affine {
+                        weights: builder.new_weights(
+                            "l1w",
+                            Shape::new(NUM_BUCKETS * l1_out_c, l1_in_total),
+                            nnue_pytorch_repeated_uniform_init_for_fan_in(l1_in_total, l1_out_c, NUM_BUCKETS),
+                        ),
+                        bias: builder.new_weights(
+                            "l1b",
+                            Shape::new(NUM_BUCKETS * l1_out_c, 1),
+                            nnue_pytorch_repeated_uniform_init_for_fan_in(l1_in_total, l1_out_c, NUM_BUCKETS),
+                        ),
+                    }
+                } else {
+                    Affine {
+                        weights: builder.new_weights(
+                            "l1w",
+                            Shape::new(NUM_BUCKETS * l1_out_c, l1_in_total),
+                            InitSettings::Zeroed,
+                        ),
+                        bias: builder.new_weights(
+                            "l1b",
+                            Shape::new(NUM_BUCKETS * l1_out_c, 1),
+                            InitSettings::Zeroed,
+                        ),
+                    }
                 };
-                let l1f = builder.new_affine("l1f", ft_out_c, l1_out_c);
-                let l2 = builder.new_affine("l2", l2_in_c, NUM_BUCKETS * l2_out_c);
-                let l3 = builder.new_affine("l3", l2_out_c, NUM_BUCKETS);
+                let l1f = if args.nnue_pytorch_init {
+                    Affine {
+                        weights: builder.new_weights("l1fw", Shape::new(l1_out_c, ft_out_c), InitSettings::Zeroed),
+                        bias: builder.new_weights("l1fb", Shape::new(l1_out_c, 1), InitSettings::Zeroed),
+                    }
+                } else {
+                    builder.new_affine("l1f", ft_out_c, l1_out_c)
+                };
+                let l2 = if args.nnue_pytorch_init {
+                    Affine {
+                        weights: builder.new_weights(
+                            "l2w",
+                            Shape::new(NUM_BUCKETS * l2_out_c, l2_in_c),
+                            nnue_pytorch_repeated_uniform_init_for_fan_in(l2_in_c, l2_out_c, NUM_BUCKETS),
+                        ),
+                        bias: builder.new_weights(
+                            "l2b",
+                            Shape::new(NUM_BUCKETS * l2_out_c, 1),
+                            nnue_pytorch_repeated_uniform_init_for_fan_in(l2_in_c, l2_out_c, NUM_BUCKETS),
+                        ),
+                    }
+                } else {
+                    builder.new_affine("l2", l2_in_c, NUM_BUCKETS * l2_out_c)
+                };
+                let l3 = if args.nnue_pytorch_init {
+                    Affine {
+                        weights: builder.new_weights(
+                            "l3w",
+                            Shape::new(NUM_BUCKETS, l2_out_c),
+                            nnue_pytorch_repeated_uniform_init_for_fan_in(l2_out_c, 1, NUM_BUCKETS),
+                        ),
+                        bias: builder.new_weights("l3b", Shape::new(NUM_BUCKETS, 1), InitSettings::Zeroed),
+                    }
+                } else {
+                    builder.new_affine("l3", l2_out_c, NUM_BUCKETS)
+                };
 
                 // Forward pass
                 let stm = l0.forward(stm_inputs).crelu().pairwise_mul() * (127.0 / 128.0);
@@ -2160,6 +2253,41 @@ mod tests {
     #[test]
     fn test_loss_power_matches_nnue_pytorch_default() {
         assert_eq!(LOSS_POWER, 2.5);
+    }
+
+    #[test]
+    fn test_nnue_pytorch_init_flag_is_parsed() {
+        let args = Args::parse_from(["shogi_layerstack", "--nnue-pytorch-init"]);
+
+        assert!(args.nnue_pytorch_init);
+    }
+
+    #[test]
+    fn test_nnue_pytorch_feature_transformer_init_matches_default() {
+        let init = nnue_pytorch_uniform_init_for_fan_in(73_305);
+
+        match init {
+            InitSettings::Uniform { mean, stdev } => {
+                assert_eq!(mean, 0.0);
+                assert_eq!(stdev, (1.0f32 / 73_305.0).sqrt());
+            }
+            _ => panic!("expected uniform init"),
+        }
+    }
+
+    #[test]
+    fn test_nnue_pytorch_stacked_linear_init_repeats_bucket_zero() {
+        let init = nnue_pytorch_repeated_uniform_init_for_fan_in(30, 32, 8);
+
+        match init {
+            InitSettings::RepeatedUniform { mean, stdev, rows_per_bucket, buckets } => {
+                assert_eq!(mean, 0.0);
+                assert_eq!(stdev, (1.0f32 / 30.0).sqrt());
+                assert_eq!(rows_per_bucket, 32);
+                assert_eq!(buckets, 8);
+            }
+            _ => panic!("expected repeated uniform init"),
+        }
     }
 
     #[test]
