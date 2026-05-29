@@ -138,6 +138,22 @@ fn nnue_pytorch_repeated_uniform_init_for_fan_in(
     InitSettings::RepeatedUniform { mean: 0.0, stdev: (1.0 / fan_in as f32).sqrt(), rows_per_bucket, buckets }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct LayerStackQuantisationScales {
+    hidden_weight: f64,
+    hidden_bias: f64,
+    output_weight: f64,
+    output_bias: f64,
+}
+
+fn layerstack_quantisation_scales(nnue2score: i32) -> LayerStackQuantisationScales {
+    let hidden_weight = f64::from(QB);
+    let hidden_bias = f64::from(QA) * f64::from(QB);
+    let output_bias = f64::from(nnue2score) * 16.0;
+    let output_weight = output_bias / f64::from(QA);
+    LayerStackQuantisationScales { hidden_weight, hidden_bias, output_weight, output_bias }
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "shogi_layerstack")]
 #[command(about = "Shogi LayerStack NNUE training script")]
@@ -1201,6 +1217,7 @@ fn build_layerstack_save_format(
     ft_out: usize,
     l1_out: usize,
     l2_out: usize,
+    eval_scale: i32,
     fv_scale: i32,
     psqt: bool,
     threat_profile: Option<ThreatProfile>,
@@ -1425,8 +1442,7 @@ fn build_layerstack_save_format(
     //   L2 weights: [l2_out × pad32(l2_in)] row-major
     //   Output weights: [pad32(l2_out)] row-major
 
-    let bias_scale = i32::from(QA) * i32::from(QB); // 127 * 64 = 8128
-
+    let quantisation_scales = layerstack_quantisation_scales(eval_scale);
     // 全バケットの LayerStack データを1つの transform で生成
     let l1_out_captured = l1_out;
     let l2_out_captured = l2_out;
@@ -1446,8 +1462,10 @@ fn build_layerstack_save_format(
             let l3w = graph.get("l3w");
             let l3b = graph.get("l3b");
 
-            let qb_f = QB as f64;
-            let bias_scale_f = bias_scale as f64;
+            let hidden_weight_scale = quantisation_scales.hidden_weight;
+            let hidden_bias_scale = quantisation_scales.hidden_bias;
+            let output_weight_scale = quantisation_scales.output_weight;
+            let output_bias_scale = quantisation_scales.output_bias;
 
             let mut output_bytes: Vec<u8> = Vec::new();
 
@@ -1460,7 +1478,7 @@ fn build_layerstack_save_format(
                 for out_idx in 0..l1_out_captured {
                     let global_out = bucket * l1_out_captured + out_idx;
                     let merged_bias = l1b.values[global_out] + l1fb.values[out_idx];
-                    let val = (bias_scale_f * merged_bias as f64).round() as i32;
+                    let val = (hidden_bias_scale * merged_bias as f64).round() as i32;
                     output_bytes.extend_from_slice(&val.to_le_bytes());
                 }
 
@@ -1487,12 +1505,12 @@ fn build_layerstack_save_format(
                             let bucket_w = l1w.values[in_idx * l1_rows_total + global_out];
                             let shared_w = l1fw.values[in_idx * l1_out_captured + out_idx];
                             let w = bucket_w + shared_w;
-                            let q = (qb_f * w as f64).round() as i8;
+                            let q = (hidden_weight_scale * w as f64).round() as i8;
                             output_bytes.push(q as u8);
                         } else if in_idx < l1_total_in {
                             // HandCount Dense 部: bucket_w のみ（共有なし）
                             let bucket_w = l1w.values[in_idx * l1_rows_total + global_out];
-                            let q = (qb_f * bucket_w as f64).round() as i8;
+                            let q = (hidden_weight_scale * bucket_w as f64).round() as i8;
                             output_bytes.push(q as u8);
                         } else {
                             output_bytes.push(0u8); // padding
@@ -1501,11 +1519,10 @@ fn build_layerstack_save_format(
                 }
 
                 // === L2 layer ===
-                // Biases: i32, scale = 127 * QB (CReLU output is 127-scale)
-                let l2_bias_scale = 127.0 * qb_f;
+                // Biases: i32, scale = QA * QB (CReLU output is QA-scale)
                 for out_idx in 0..l2_out_captured {
                     let global_out = bucket * l2_out_captured + out_idx;
-                    let val = (l2_bias_scale * l2b.values[global_out] as f64).round() as i32;
+                    let val = (hidden_bias_scale * l2b.values[global_out] as f64).round() as i32;
                     output_bytes.extend_from_slice(&val.to_le_bytes());
                 }
 
@@ -1518,7 +1535,7 @@ fn build_layerstack_save_format(
                         if in_idx < l2_in_captured {
                             // l2w shape [NUM_BUCKETS*l2_out, l2_in], column-major
                             let w = l2w.values[in_idx * l2_rows_total + global_out];
-                            let q = (qb_f * w as f64).round() as i8;
+                            let q = (hidden_weight_scale * w as f64).round() as i8;
                             output_bytes.push(q as u8);
                         } else {
                             output_bytes.push(0u8);
@@ -1527,15 +1544,14 @@ fn build_layerstack_save_format(
                 }
 
                 // === Output layer ===
-                // Bias: i32, scale = 127 * QB
-                let out_bias_scale = 127.0 * qb_f;
+                // Bias: i32, scale = nnue2score * 16 (nnue-pytorch compatible)
                 {
                     let global_out = bucket;
-                    let val = (out_bias_scale * l3b.values[global_out] as f64).round() as i32;
+                    let val = (output_bias_scale * l3b.values[global_out] as f64).round() as i32;
                     output_bytes.extend_from_slice(&val.to_le_bytes());
                 }
 
-                // Weights: i8, scale = QB = 64
+                // Weights: i8, scale = nnue2score * 16 / QA (nnue-pytorch compatible)
                 let output_padded_in = pad32(l2_out_captured);
                 {
                     let global_out = bucket;
@@ -1543,7 +1559,7 @@ fn build_layerstack_save_format(
                         if in_idx < l2_out_captured {
                             // l3w shape [NUM_BUCKETS, l2_out], column-major
                             let w = l3w.values[in_idx * NUM_BUCKETS + global_out];
-                            let q = (qb_f * w as f64).round() as i8;
+                            let q = (output_weight_scale * w as f64).round() as i8;
                             output_bytes.push(q as u8);
                         } else {
                             output_bytes.push(0u8);
@@ -1881,6 +1897,7 @@ fn main() {
         ft_out,
         l1_out,
         l2_out,
+        args.scale,
         fv_scale,
         args.psqt,
         threat_profile,
@@ -2288,6 +2305,16 @@ mod tests {
             }
             _ => panic!("expected repeated uniform init"),
         }
+    }
+
+    #[test]
+    fn test_output_layer_quantisation_scale_matches_nnue_pytorch() {
+        let scales = layerstack_quantisation_scales(600);
+
+        assert_eq!(scales.hidden_weight, 64.0);
+        assert_eq!(scales.hidden_bias, 127.0 * 64.0);
+        assert_eq!(scales.output_weight, 600.0 * 16.0 / 127.0);
+        assert_eq!(scales.output_bias, 600.0 * 16.0);
     }
 
     #[test]
