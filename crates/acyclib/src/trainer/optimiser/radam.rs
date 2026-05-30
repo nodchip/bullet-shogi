@@ -6,12 +6,12 @@ use std::{
 };
 
 use crate::device::{
-    Device, OperationError,
     operation::{AdamConfig, BaseOperations},
     tensor::DenseMatrix,
+    Device, OperationError,
 };
 
-use super::{OptimiserState, utils};
+use super::{utils, OptimiserState};
 
 #[derive(Clone, Copy, Debug)]
 pub struct RAdamParams {
@@ -86,6 +86,7 @@ impl<D: Device> OptimiserState<D> for RAdam<D> {
             beta2: self.params.beta2,
             gradient_factor,
             learning_rate: lr,
+            eps: 1.0e-8,
             denom: n_sma > params.n_sma_threshold,
             clip: self.params.clip,
             decay: 1.0 - self.params.decay * lr,

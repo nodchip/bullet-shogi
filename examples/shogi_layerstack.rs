@@ -25,7 +25,7 @@ Options:
     --net-id <NAME>     Network ID (default: shogi-ls-1536)
     --resume <PATH>     Resume from checkpoint
     --quantise-only     Only re-quantise checkpoint (requires --resume)
-    --optimizer <OPT>   Optimizer (adamw, radam, ranger) (default: ranger)
+    --optimizer <OPT>   Optimizer (adamw, radam, ranger, ranger21) (default: ranger)
     --win-rate-model    Use win rate model for score conversion
     --batches-per-superbatch <N>  Batches per superbatch (default: auto)
     --lr-gamma <F>      LR decay rate (default: 0.992)
@@ -53,7 +53,7 @@ use bullet_lib::{
         SHOGI_PROGRESS_GIKOU_LITE_NUM_FEATURES,
     },
     nn::{
-        optimiser::{self, AdamWParams, RAdamParams, RangerParams},
+        optimiser::{self, AdamWParams, RAdamParams, Ranger21Params, RangerParams},
         Affine, BackendMarker, InitSettings, NetworkBuilderNode, Shape,
     },
     trainer::{
@@ -87,12 +87,13 @@ static WRM_LOSS_PARAMS: OnceLock<WrmLossParams> = OnceLock::new();
 // CLI Arguments
 // =============================================================================
 
-#[derive(Debug, Clone, Copy, ValueEnum, Default)]
+#[derive(Debug, Clone, Copy, ValueEnum, Default, PartialEq, Eq)]
 enum OptimizerType {
     AdamW,
     RAdam,
     #[default]
     Ranger,
+    Ranger21,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum, Default, PartialEq, Eq)]
@@ -152,6 +153,14 @@ fn layerstack_quantisation_scales(nnue2score: i32) -> LayerStackQuantisationScal
     let output_bias = f64::from(nnue2score) * 16.0;
     let output_weight = output_bias / f64::from(QA);
     LayerStackQuantisationScales { hidden_weight, hidden_bias, output_weight, output_bias }
+}
+
+fn nnue_pytorch_hidden_weight_clip() -> f32 {
+    QA as f32 / QB as f32
+}
+
+fn nnue_pytorch_output_weight_clip(nnue2score: i32) -> f32 {
+    (QA * QA) as f32 / (nnue2score as f32 * 16.0)
 }
 
 #[derive(Parser, Debug)]
@@ -222,7 +231,7 @@ struct Args {
     #[arg(long, default_value = "shogi-ls-1536")]
     net_id: String,
 
-    /// Optimizer (adamw, radam, ranger)
+    /// Optimizer (adamw, radam, ranger, ranger21)
     #[arg(long, value_enum, default_value = "ranger")]
     optimizer: OptimizerType,
 
@@ -1678,6 +1687,7 @@ fn main() {
         OptimizerType::AdamW => "AdamW",
         OptimizerType::RAdam => "RAdam",
         OptimizerType::Ranger => "Ranger",
+        OptimizerType::Ranger21 => "Ranger21",
     };
 
     let fv_scale = (i32::from(QA) * i32::from(QB) + args.scale / 2) / args.scale;
@@ -2168,6 +2178,29 @@ fn main() {
                     trainer.optimiser.set_params(RangerParams { decay: args.weight_decay, ..Default::default() });
                     maybe_run_or_quantise!(trainer);
                 }
+                OptimizerType::Ranger21 => {
+                    let mut trainer =
+                        build_trainer_with_input!(optimiser::Ranger21, use_win_rate_model, bucket_impl, $input);
+                    let base_params = Ranger21Params { decay: args.weight_decay, ..Default::default() };
+                    trainer.optimiser.set_params(base_params);
+
+                    let hidden_clip = nnue_pytorch_hidden_weight_clip();
+                    let output_clip = nnue_pytorch_output_weight_clip(args.scale);
+                    trainer.optimiser.set_params_for_weight(
+                        "l1w",
+                        Ranger21Params { clip: Some((-hidden_clip, hidden_clip)), ..base_params },
+                    );
+                    trainer.optimiser.set_params_for_weight(
+                        "l2w",
+                        Ranger21Params { clip: Some((-hidden_clip, hidden_clip)), ..base_params },
+                    );
+                    trainer.optimiser.set_params_for_weight(
+                        "l3w",
+                        Ranger21Params { clip: Some((-output_clip, output_clip)), ..base_params },
+                    );
+
+                    maybe_run_or_quantise!(trainer);
+                }
             }
         }};
     }
@@ -2277,6 +2310,13 @@ mod tests {
         let args = Args::parse_from(["shogi_layerstack", "--nnue-pytorch-init"]);
 
         assert!(args.nnue_pytorch_init);
+    }
+
+    #[test]
+    fn test_ranger21_optimizer_flag_is_parsed() {
+        let args = Args::parse_from(["shogi_layerstack", "--optimizer", "ranger21"]);
+
+        assert_eq!(args.optimizer, OptimizerType::Ranger21);
     }
 
     #[test]

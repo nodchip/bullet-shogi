@@ -1,8 +1,8 @@
-use acyclib::device::{DeviceBuffer, operation::AdamConfig};
+use acyclib::device::{operation::AdamConfig, DeviceBuffer};
 
 use crate::{
+    backend::{ops, Buffer},
     DeviceError,
-    backend::{Buffer, ops},
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -27,6 +27,7 @@ pub fn adam(
             config.beta2,
             config.gradient_factor,
             config.learning_rate,
+            config.eps,
             config.denom,
             config.decay,
             min,

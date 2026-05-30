@@ -4,6 +4,7 @@ pub struct AdamConfig {
     pub beta2: f32,
     pub gradient_factor: f32,
     pub learning_rate: f32,
+    pub eps: f32,
     pub denom: bool,
     pub decay: f32,
     pub clip: Option<(f32, f32)>,

@@ -1,8 +1,8 @@
 pub use acyclib::{
     device::tensor::Shape,
     graph::{
-        Node,
         builder::{Affine, GraphBuilder as NetworkBuilder, GraphBuilderNode as NetworkBuilderNode, InitSettings},
+        Node,
     },
 };
 
@@ -23,12 +23,13 @@ pub use bullet_cuda_backend::{CudaDevice as ExecutionContext, CudaError as Devic
 
 pub mod optimiser {
     use crate::nn::ExecutionContext;
-    use acyclib::trainer::optimiser::{self, OptimiserState, radam};
+    use acyclib::trainer::optimiser::{self, radam, OptimiserState};
 
     pub type AdamWOptimiser = optimiser::adam::AdamW<ExecutionContext>;
     pub type RAdamOptimiser = radam::RAdam<ExecutionContext>;
     pub type RangerOptimiser = optimiser::ranger::Ranger<ExecutionContext>;
-    pub use optimiser::{Optimiser, adam::AdamWParams, ranger::RangerParams};
+    pub type Ranger21Optimiser = optimiser::ranger21::Ranger21<ExecutionContext>;
+    pub use optimiser::{adam::AdamWParams, ranger::RangerParams, ranger21::Ranger21Params, Optimiser};
 
     pub trait OptimiserType: Default {
         type Optimiser: OptimiserState<ExecutionContext>;
@@ -50,6 +51,12 @@ pub mod optimiser {
     pub struct Ranger;
     impl OptimiserType for Ranger {
         type Optimiser = RangerOptimiser;
+    }
+
+    #[derive(Default)]
+    pub struct Ranger21;
+    impl OptimiserType for Ranger21 {
+        type Optimiser = Ranger21Optimiser;
     }
 
     #[derive(Clone, Copy, Debug)]

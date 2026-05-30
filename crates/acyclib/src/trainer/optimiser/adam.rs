@@ -1,12 +1,12 @@
 use std::{collections::HashMap, sync::Arc};
 
 use crate::device::{
-    Device, OperationError,
     operation::{AdamConfig, BaseOperations},
     tensor::DenseMatrix,
+    Device, OperationError,
 };
 
-use super::{OptimiserState, utils};
+use super::{utils, OptimiserState};
 
 #[derive(Clone, Copy, Debug)]
 pub struct AdamWParams {
@@ -65,6 +65,7 @@ impl<D: Device> OptimiserState<D> for AdamW<D> {
             beta2: self.params.beta2,
             gradient_factor,
             learning_rate,
+            eps: 1.0e-8,
             denom: true,
             decay: 1.0 - self.params.decay * learning_rate,
             clip,

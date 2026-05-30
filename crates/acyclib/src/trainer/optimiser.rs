@@ -3,13 +3,14 @@ pub mod clip;
 pub mod decay;
 pub mod radam;
 pub mod ranger;
+pub mod ranger21;
 pub mod utils;
 
 use std::{collections::HashMap, fmt::Debug, marker::PhantomData, sync::Arc};
 
 use crate::{
-    device::{Device, OperationError, tensor::DenseMatrix},
-    graph::{Graph, GraphNodeId, GraphNodeIdTy, like::GraphLike},
+    device::{tensor::DenseMatrix, Device, OperationError},
+    graph::{like::GraphLike, Graph, GraphNodeId, GraphNodeIdTy},
 };
 
 pub trait OptimiserState<D: Device>: Sized {
@@ -214,5 +215,80 @@ where
     fn write_to_checkpoint(map: &HashMap<String, &Self>, path: &str) -> Result<(), D::DeviceError> {
         let map = map.iter().map(|(id, single)| (id.clone(), &single.optimiser)).collect();
         O::write_to_checkpoint(&map, path)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use crate::device::{cpu::CpuThread, tensor::DenseMatrix};
+
+    use super::{
+        ranger21::{Ranger21, Ranger21Params},
+        OptimiserState,
+    };
+
+    fn dense_values(weights: &DenseMatrix<CpuThread>) -> Vec<f32> {
+        let mut values = vec![0.0; weights.size()];
+        weights.write_to_slice(&mut values).unwrap();
+        values
+    }
+
+    fn reference_ranger21_update(
+        weight: f32,
+        grad: f32,
+        step: usize,
+        learning_rate: f32,
+        params: Ranger21Params,
+    ) -> f32 {
+        let beta1_sq = params.beta1 * params.beta1;
+        let momentum = (1.0 - beta1_sq) * grad;
+        let velocity = (1.0 - params.beta2) * grad * grad;
+        let bias_correction1 = 1.0 - params.beta1.powi(step as i32);
+        let bias_correction2 = 1.0 - params.beta2.powi(step as i32);
+        let noise_norm = ((1.0f32 + params.beta2).powi(2) + params.beta2.powi(2)).sqrt();
+        let denom = (velocity / bias_correction2).sqrt() + params.eps;
+        weight - learning_rate * momentum / (bias_correction1 * noise_norm * denom)
+    }
+
+    #[test]
+    fn ranger21_first_step_matches_nnue_pytorch_adamw_pnm_zero() {
+        let device = Arc::new(CpuThread);
+        let mut weights = DenseMatrix::zeroed(device.clone(), 2, None).unwrap();
+        weights.load_from_slice(None, &[1.0, -2.0]).unwrap();
+        let mut grads = DenseMatrix::zeroed(device.clone(), 2, None).unwrap();
+        grads.load_from_slice(None, &[0.5, -0.25]).unwrap();
+
+        let params = Ranger21Params { clip: None, ..Default::default() };
+        let mut optimiser = Ranger21::<CpuThread>::new(device, 2, params).unwrap();
+        optimiser.update(&mut weights, &mut grads, 1.0, 0.001).unwrap();
+
+        let actual = dense_values(&weights);
+        let expected = [
+            reference_ranger21_update(1.0, 0.5, 1, 0.001, params),
+            reference_ranger21_update(-2.0, -0.25, 1, 0.001, params),
+        ];
+
+        for (actual, expected) in actual.iter().zip(expected) {
+            assert!((actual - expected).abs() < 1.0e-7, "{actual} != {expected}");
+        }
+    }
+
+    #[test]
+    fn ranger21_lookahead_cache_starts_from_initial_weights() {
+        let device = Arc::new(CpuThread);
+        let mut weights = DenseMatrix::zeroed(device.clone(), 2, None).unwrap();
+        weights.load_from_slice(None, &[1.0, -2.0]).unwrap();
+        let mut grads = DenseMatrix::zeroed(device.clone(), 2, None).unwrap();
+        grads.load_from_slice(None, &[0.0, 0.0]).unwrap();
+
+        let params = Ranger21Params { clip: None, ..Default::default() };
+        let mut optimiser = Ranger21::<CpuThread>::new(device, 2, params).unwrap();
+        for _ in 0..params.lookahead_mergetime {
+            optimiser.update(&mut weights, &mut grads, 1.0, 0.001).unwrap();
+        }
+
+        assert_eq!(dense_values(&weights), vec![1.0, -2.0]);
     }
 }

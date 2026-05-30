@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use crate::device::{
-    Device, DeviceBuffer,
     operation::{AdamConfig, BaseOperations, BlasOperations, DiffableFromOutput, GemmConfig},
-    tensor::{Shape, rng},
+    tensor::{rng, Shape},
+    Device, DeviceBuffer,
 };
 
 use super::{CpuBuffer, CpuThread};
@@ -89,6 +89,7 @@ impl CpuThread {
             beta2: 0.999,
             gradient_factor: 0.1,
             learning_rate: 0.001,
+            eps: 1.0e-8,
             denom: true,
             decay: 0.5,
             clip: Some((-1.0, 1.0)),

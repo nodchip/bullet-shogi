@@ -1,16 +1,16 @@
 use std::sync::Arc;
 
 use acyclib::device::{
-    DeviceBuffer,
     operation::{AdamConfig, BaseOperations, DiffableFromOutput, GemmConfig},
     tensor::Shape,
+    DeviceBuffer,
 };
 use cudarc::{
     cublas::Gemm,
     driver::{CudaSlice, DriverError, PushKernelArg},
 };
 
-use crate::{CudaBuffer, CudaDevice, CudaError, convert_gemm_config};
+use crate::{convert_gemm_config, CudaBuffer, CudaDevice, CudaError};
 
 pub(crate) fn set_to(
     device: Arc<CudaDevice>,
@@ -421,7 +421,7 @@ impl BaseOperations for CudaBuffer<f32> {
     ) -> Result<(), Self::BaseError> {
         let func = self.device.module().load_function("AdamKernel").map_err(CudaError::Driver)?;
 
-        let (min, max) = config.clip.unwrap_or((1.0, 1.0));
+        let (min, max) = config.clip.unwrap_or((f32::MIN, f32::MAX));
 
         unsafe {
             self.device
@@ -432,6 +432,7 @@ impl BaseOperations for CudaBuffer<f32> {
                 .arg(&config.beta2)
                 .arg(&config.gradient_factor)
                 .arg(&config.learning_rate)
+                .arg(&config.eps)
                 .arg(&config.decay)
                 .arg(&min)
                 .arg(&max)
