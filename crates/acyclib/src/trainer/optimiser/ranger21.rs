@@ -32,6 +32,7 @@ impl Default for Ranger21Params {
 
 pub struct Ranger21<D: Device> {
     momentum: DenseMatrix<D>,
+    neg_momentum: DenseMatrix<D>,
     velocity: DenseMatrix<D>,
     slow_params: DenseMatrix<D>,
     params: Ranger21Params,
@@ -46,6 +47,7 @@ impl<D: Device> OptimiserState<D> for Ranger21<D> {
     fn new(device: Arc<D>, size: usize, params: Self::Params) -> Result<Self, D::DeviceError> {
         Ok(Self {
             momentum: DenseMatrix::zeroed(device.clone(), size, None)?,
+            neg_momentum: DenseMatrix::zeroed(device.clone(), size, None)?,
             velocity: DenseMatrix::zeroed(device.clone(), size, None)?,
             slow_params: DenseMatrix::zeroed(device, size, None)?,
             params,
@@ -64,8 +66,10 @@ impl<D: Device> OptimiserState<D> for Ranger21<D> {
     ) -> Result<(), OperationError<D::DeviceError>> {
         assert!(weights.batch_size().is_none());
         assert!(self.momentum.batch_size().is_none());
+        assert!(self.neg_momentum.batch_size().is_none());
         assert!(self.velocity.batch_size().is_none());
         assert_eq!(weights.size(), self.momentum.size());
+        assert_eq!(weights.size(), self.neg_momentum.size());
         assert_eq!(weights.size(), self.velocity.size());
 
         if !self.slow_initialised {
@@ -94,7 +98,8 @@ impl<D: Device> OptimiserState<D> for Ranger21<D> {
             clip: params.clip,
         };
 
-        weights.buf.adam(&cfg, weights.size(), &grads.buf, &mut self.momentum.buf, &mut self.velocity.buf)?;
+        let momentum = if self.step % 2 == 1 { &mut self.momentum } else { &mut self.neg_momentum };
+        weights.buf.adam(&cfg, weights.size(), &grads.buf, &mut momentum.buf, &mut self.velocity.buf)?;
 
         self.lookahead_step += 1;
         if self.lookahead_step >= params.lookahead_mergetime {
@@ -111,6 +116,7 @@ impl<D: Device> OptimiserState<D> for Ranger21<D> {
         self.lookahead_step = 0;
         self.slow_initialised = false;
         self.momentum.set_to(0.0)?;
+        self.neg_momentum.set_to(0.0)?;
         self.velocity.set_to(0.0)?;
         self.slow_params.set_to(0.0)
     }
@@ -124,21 +130,32 @@ impl<D: Device> OptimiserState<D> for Ranger21<D> {
         path: &str,
         old_format: bool,
     ) -> Result<(), OperationError<D::DeviceError>> {
-        let paths = [format!("{path}/momentum.bin"), format!("{path}/velocity.bin"), format!("{path}/slow.bin")];
+        let paths = [
+            format!("{path}/momentum.bin"),
+            format!("{path}/neg_momentum.bin"),
+            format!("{path}/velocity.bin"),
+            format!("{path}/slow.bin"),
+        ];
         let mut momentum = utils::load_weights_from_file(&paths[0], old_format);
-        let mut velocity = utils::load_weights_from_file(&paths[1], old_format);
-        let mut slow = utils::load_weights_from_file(&paths[2], old_format);
+        let mut neg_momentum = utils::load_weights_from_file(&paths[1], old_format);
+        let mut velocity = utils::load_weights_from_file(&paths[2], old_format);
+        let mut slow = utils::load_weights_from_file(&paths[3], old_format);
 
         momentum.sort_by_key(|(id, _)| id.clone());
+        neg_momentum.sort_by_key(|(id, _)| id.clone());
         velocity.sort_by_key(|(id, _)| id.clone());
         slow.sort_by_key(|(id, _)| id.clone());
 
-        for (((id1, mom), (id2, vel)), (id3, slow_params)) in momentum.iter().zip(velocity.iter()).zip(slow.iter()) {
+        for ((((id1, mom), (id2, neg_mom)), (id3, vel)), (id4, slow_params)) in
+            momentum.iter().zip(neg_momentum.iter()).zip(velocity.iter()).zip(slow.iter())
+        {
             assert_eq!(id1, id2);
             assert_eq!(id1, id3);
+            assert_eq!(id1, id4);
 
             let single = map.get_mut(id1).unwrap();
             single.momentum.load_from_slice(None, mom)?;
+            single.neg_momentum.load_from_slice(None, neg_mom)?;
             single.velocity.load_from_slice(None, vel)?;
             single.slow_params.load_from_slice(None, slow_params)?;
             single.slow_initialised = true;
@@ -167,9 +184,11 @@ impl<D: Device> OptimiserState<D> for Ranger21<D> {
 
     fn write_to_checkpoint(map: &HashMap<String, &Self>, path: &str) -> Result<(), D::DeviceError> {
         let momentum: Vec<_> = map.iter().map(|(id, single)| (id, &single.momentum)).collect();
+        let neg_momentum: Vec<_> = map.iter().map(|(id, single)| (id, &single.neg_momentum)).collect();
         let velocity: Vec<_> = map.iter().map(|(id, single)| (id, &single.velocity)).collect();
         let slow: Vec<_> = map.iter().map(|(id, single)| (id, &single.slow_params)).collect();
         utils::write_weights_to_file(&momentum, &format!("{path}/momentum.bin"))?;
+        utils::write_weights_to_file(&neg_momentum, &format!("{path}/neg_momentum.bin"))?;
         utils::write_weights_to_file(&velocity, &format!("{path}/velocity.bin"))?;
         utils::write_weights_to_file(&slow, &format!("{path}/slow.bin"))?;
 

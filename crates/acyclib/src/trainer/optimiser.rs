@@ -252,6 +252,26 @@ mod tests {
         weight - learning_rate * momentum / (bias_correction1 * noise_norm * denom)
     }
 
+    fn reference_ranger21_pnm_zero_update(
+        weight: f32,
+        grad: f32,
+        step: usize,
+        learning_rate: f32,
+        params: Ranger21Params,
+        momentum: &mut f32,
+        velocity: &mut f32,
+    ) -> f32 {
+        let beta1_sq = params.beta1 * params.beta1;
+        *momentum = beta1_sq * *momentum + (1.0 - beta1_sq) * grad;
+        *velocity = params.beta2 * *velocity + (1.0 - params.beta2) * grad * grad;
+
+        let bias_correction1 = 1.0 - params.beta1.powi(step as i32);
+        let bias_correction2 = 1.0 - params.beta2.powi(step as i32);
+        let noise_norm = ((1.0f32 + params.beta2).powi(2) + params.beta2.powi(2)).sqrt();
+        let denom = (*velocity / bias_correction2).sqrt() + params.eps;
+        weight - learning_rate * *momentum / (bias_correction1 * noise_norm * denom)
+    }
+
     #[test]
     fn ranger21_first_step_matches_nnue_pytorch_adamw_pnm_zero() {
         let device = Arc::new(CpuThread);
@@ -290,5 +310,37 @@ mod tests {
         }
 
         assert_eq!(dense_values(&weights), vec![1.0, -2.0]);
+    }
+
+    #[test]
+    fn ranger21_second_step_uses_alternating_pnm_buffers() {
+        let device = Arc::new(CpuThread);
+        let mut weights = DenseMatrix::zeroed(device.clone(), 1, None).unwrap();
+        weights.load_from_slice(None, &[1.0]).unwrap();
+        let mut grads = DenseMatrix::zeroed(device.clone(), 1, None).unwrap();
+        grads.load_from_slice(None, &[0.5]).unwrap();
+
+        let params = Ranger21Params { clip: None, ..Default::default() };
+        let mut optimiser = Ranger21::<CpuThread>::new(device, 1, params).unwrap();
+        optimiser.update(&mut weights, &mut grads, 1.0, 0.001).unwrap();
+        optimiser.update(&mut weights, &mut grads, 1.0, 0.001).unwrap();
+
+        let mut pos_momentum = 0.0;
+        let mut neg_momentum = 0.0;
+        let mut velocity = 0.0;
+        let weight_after_step1 =
+            reference_ranger21_pnm_zero_update(1.0, 0.5, 1, 0.001, params, &mut pos_momentum, &mut velocity);
+        let expected = reference_ranger21_pnm_zero_update(
+            weight_after_step1,
+            0.5,
+            2,
+            0.001,
+            params,
+            &mut neg_momentum,
+            &mut velocity,
+        );
+        let actual = dense_values(&weights)[0];
+
+        assert!((actual - expected).abs() < 1.0e-7, "{actual} != {expected}");
     }
 }
