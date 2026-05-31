@@ -272,6 +272,17 @@ mod tests {
         weight - learning_rate * *momentum / (bias_correction1 * noise_norm * denom)
     }
 
+    fn reference_buggy_norm_loss(mut weights: Vec<f32>, learning_rate: f32, params: Ranger21Params) -> Vec<f32> {
+        for _ in 0..params.norm_loss_repetitions {
+            let unit_norm = weights.iter().map(|x| x * x).sum::<f32>().sqrt();
+            let correction = 2.0 * params.norm_loss_factor * (1.0 - 1.0 / (unit_norm + params.eps));
+            let scale = 1.0 - learning_rate * correction;
+            weights.iter_mut().for_each(|x| *x *= scale);
+        }
+
+        weights
+    }
+
     #[test]
     fn ranger21_first_step_matches_nnue_pytorch_adamw_pnm_zero() {
         let device = Arc::new(CpuThread);
@@ -342,5 +353,26 @@ mod tests {
         let actual = dense_values(&weights)[0];
 
         assert!((actual - expected).abs() < 1.0e-7, "{actual} != {expected}");
+    }
+
+    #[test]
+    fn ranger21_can_apply_nnue_pytorch_buggy_norm_loss_repeatedly() {
+        let device = Arc::new(CpuThread);
+        let mut weights = DenseMatrix::zeroed(device.clone(), 2, None).unwrap();
+        weights.load_from_slice(None, &[0.25, -0.5]).unwrap();
+        let mut grads = DenseMatrix::zeroed(device.clone(), 2, None).unwrap();
+        grads.load_from_slice(None, &[0.0, 0.0]).unwrap();
+
+        let params =
+            Ranger21Params { clip: None, norm_loss_factor: 1.0e-4, norm_loss_repetitions: 9, ..Default::default() };
+        let mut optimiser = Ranger21::<CpuThread>::new(device, 2, params).unwrap();
+        optimiser.update(&mut weights, &mut grads, 1.0, 0.001).unwrap();
+
+        let expected = reference_buggy_norm_loss(vec![0.25, -0.5], 0.001, params);
+        let actual = dense_values(&weights);
+
+        for (actual, expected) in actual.iter().zip(expected) {
+            assert!((actual - expected).abs() < 1.0e-7, "{actual} != {expected}");
+        }
     }
 }
