@@ -53,7 +53,7 @@ use bullet_lib::{
         SHOGI_PROGRESS_GIKOU_LITE_NUM_FEATURES,
     },
     nn::{
-        optimiser::{self, AdamWParams, RAdamParams, Ranger21Params, RangerParams},
+        optimiser::{self, AdamWParams, NormLossPlacement, RAdamParams, Ranger21Params, RangerParams},
         Affine, BackendMarker, InitSettings, NetworkBuilderNode, Shape,
     },
     trainer::{
@@ -2194,9 +2194,23 @@ fn main() {
                         "l2w",
                         Ranger21Params { clip: Some((-hidden_clip, hidden_clip)), ..base_params },
                     );
+                    let norm_before = Ranger21Params {
+                        norm_loss_factor: 1.0e-4,
+                        norm_loss_placement: NormLossPlacement::Before,
+                        ..base_params
+                    };
+                    let norm_after = Ranger21Params {
+                        norm_loss_factor: 1.0e-4,
+                        norm_loss_placement: NormLossPlacement::After,
+                        ..base_params
+                    };
+                    trainer.optimiser.set_params_for_weight("l3b", norm_before);
+                    for id in ["l0b", "l1fw", "l1fb", "l1w", "l1b", "l2w", "l2b"] {
+                        trainer.optimiser.set_params_for_weight(id, norm_after);
+                    }
                     trainer.optimiser.set_params_for_weight(
                         "l3w",
-                        Ranger21Params { clip: Some((-output_clip, output_clip)), ..base_params },
+                        Ranger21Params { clip: Some((-output_clip, output_clip)), ..norm_after },
                     );
 
                     maybe_run_or_quantise!(trainer);

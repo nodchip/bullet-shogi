@@ -13,6 +13,14 @@ use crate::device::{
 
 use super::{utils, OptimiserState};
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NormLossPlacement {
+    #[default]
+    None,
+    Before,
+    After,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Ranger21Params {
     pub decay: f32,
@@ -22,11 +30,23 @@ pub struct Ranger21Params {
     pub alpha: f32,
     pub lookahead_mergetime: usize,
     pub clip: Option<(f32, f32)>,
+    pub norm_loss_factor: f32,
+    pub norm_loss_placement: NormLossPlacement,
 }
 
 impl Default for Ranger21Params {
     fn default() -> Self {
-        Self { decay: 0.0, beta1: 0.9, beta2: 0.999, eps: 1.0e-7, alpha: 0.5, lookahead_mergetime: 5, clip: None }
+        Self {
+            decay: 0.0,
+            beta1: 0.9,
+            beta2: 0.999,
+            eps: 1.0e-7,
+            alpha: 0.5,
+            lookahead_mergetime: 5,
+            clip: None,
+            norm_loss_factor: 0.0,
+            norm_loss_placement: NormLossPlacement::None,
+        }
     }
 }
 
@@ -81,6 +101,7 @@ impl<D: Device> OptimiserState<D> for Ranger21<D> {
 
         let params = self.params;
         let step = self.step as f32;
+        apply_norm_loss(weights, learning_rate, params, NormLossPlacement::Before)?;
         let bias_correction1 = 1.0 - params.beta1.powf(step);
         let bias_correction2 = 1.0 - params.beta2.powf(step);
         let noise_norm = ((1.0 + params.beta2).powi(2) + params.beta2.powi(2)).sqrt();
@@ -100,6 +121,7 @@ impl<D: Device> OptimiserState<D> for Ranger21<D> {
 
         let momentum = if self.step % 2 == 1 { &mut self.momentum } else { &mut self.neg_momentum };
         weights.buf.adam(&cfg, weights.size(), &grads.buf, &mut momentum.buf, &mut self.velocity.buf)?;
+        apply_norm_loss(weights, learning_rate, params, NormLossPlacement::After)?;
 
         self.lookahead_step += 1;
         if self.lookahead_step >= params.lookahead_mergetime {
@@ -199,6 +221,29 @@ impl<D: Device> OptimiserState<D> for Ranger21<D> {
 
         Ok(())
     }
+}
+
+fn apply_norm_loss<D: Device>(
+    weights: &mut DenseMatrix<D>,
+    learning_rate: f32,
+    params: Ranger21Params,
+    placement: NormLossPlacement,
+) -> Result<(), OperationError<D::DeviceError>> {
+    if params.norm_loss_factor == 0.0 || params.norm_loss_placement != placement {
+        return Ok(());
+    }
+
+    let mut values = vec![0.0; weights.size()];
+    weights.write_to_slice(&mut values)?;
+
+    let unit_norm = values.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let correction = 2.0 * params.norm_loss_factor * (1.0 - 1.0 / (unit_norm + params.eps));
+    let scale = 1.0 - learning_rate * correction;
+    values.iter_mut().for_each(|x| *x *= scale);
+
+    weights.load_from_slice(None, &values)?;
+
+    Ok(())
 }
 
 fn load_legacy_step_file(map: &mut HashMap<String, &mut usize>, path: &str) {

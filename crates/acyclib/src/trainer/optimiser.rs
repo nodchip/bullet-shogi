@@ -225,7 +225,7 @@ mod tests {
     use crate::device::{cpu::CpuThread, tensor::DenseMatrix};
 
     use super::{
-        ranger21::{Ranger21, Ranger21Params},
+        ranger21::{NormLossPlacement, Ranger21, Ranger21Params},
         OptimiserState,
     };
 
@@ -270,6 +270,12 @@ mod tests {
         let noise_norm = ((1.0f32 + params.beta2).powi(2) + params.beta2.powi(2)).sqrt();
         let denom = (*velocity / bias_correction2).sqrt() + params.eps;
         weight - learning_rate * *momentum / (bias_correction1 * noise_norm * denom)
+    }
+
+    fn reference_norm_loss(weight: f32, learning_rate: f32, params: Ranger21Params) -> f32 {
+        let unit_norm = weight.abs();
+        let correction = 2.0 * params.norm_loss_factor * (1.0 - 1.0 / (unit_norm + params.eps));
+        weight * (1.0 - learning_rate * correction)
     }
 
     #[test]
@@ -342,5 +348,53 @@ mod tests {
         let actual = dense_values(&weights)[0];
 
         assert!((actual - expected).abs() < 1.0e-7, "{actual} != {expected}");
+    }
+
+    #[test]
+    fn ranger21_applies_nnue_pytorch_norm_loss_before_adam_when_configured() {
+        let device = Arc::new(CpuThread);
+        let mut weights = DenseMatrix::zeroed(device.clone(), 1, None).unwrap();
+        weights.load_from_slice(None, &[0.25]).unwrap();
+        let mut grads = DenseMatrix::zeroed(device.clone(), 1, None).unwrap();
+        grads.load_from_slice(None, &[0.5]).unwrap();
+
+        let params = Ranger21Params {
+            clip: None,
+            norm_loss_factor: 1.0e-4,
+            norm_loss_placement: NormLossPlacement::Before,
+            ..Default::default()
+        };
+        let mut optimiser = Ranger21::<CpuThread>::new(device, 1, params).unwrap();
+        optimiser.update(&mut weights, &mut grads, 1.0, 0.001).unwrap();
+
+        let normed = reference_norm_loss(0.25, 0.001, params);
+        let expected = reference_ranger21_update(normed, 0.5, 1, 0.001, params);
+        let actual = dense_values(&weights)[0];
+
+        assert!((actual - expected).abs() < 1.0e-7, "{actual} != {expected}");
+    }
+
+    #[test]
+    fn ranger21_applies_nnue_pytorch_norm_loss_after_adam_when_configured() {
+        let device = Arc::new(CpuThread);
+        let mut weights = DenseMatrix::zeroed(device.clone(), 1, None).unwrap();
+        weights.load_from_slice(None, &[0.25]).unwrap();
+        let mut grads = DenseMatrix::zeroed(device.clone(), 1, None).unwrap();
+        grads.load_from_slice(None, &[0.5]).unwrap();
+
+        let params = Ranger21Params {
+            clip: None,
+            norm_loss_factor: 1.0e-4,
+            norm_loss_placement: NormLossPlacement::After,
+            ..Default::default()
+        };
+        let mut optimiser = Ranger21::<CpuThread>::new(device, 1, params).unwrap();
+        optimiser.update(&mut weights, &mut grads, 1.0, 0.001).unwrap();
+
+        let updated = reference_ranger21_update(0.25, 0.5, 1, 0.001, params);
+        let expected = reference_norm_loss(updated, 0.001, params);
+        let actual = dense_values(&weights)[0];
+
+        assert!((actual - expected).abs() < 2.0e-7, "{actual} != {expected}");
     }
 }

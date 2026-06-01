@@ -29,7 +29,12 @@ pub mod optimiser {
     pub type RAdamOptimiser = radam::RAdam<ExecutionContext>;
     pub type RangerOptimiser = optimiser::ranger::Ranger<ExecutionContext>;
     pub type Ranger21Optimiser = optimiser::ranger21::Ranger21<ExecutionContext>;
-    pub use optimiser::{adam::AdamWParams, ranger::RangerParams, ranger21::Ranger21Params, Optimiser};
+    pub use optimiser::{
+        adam::AdamWParams,
+        ranger::RangerParams,
+        ranger21::{NormLossPlacement, Ranger21Params},
+        Optimiser,
+    };
 
     pub trait OptimiserType: Default {
         type Optimiser: OptimiserState<ExecutionContext>;
