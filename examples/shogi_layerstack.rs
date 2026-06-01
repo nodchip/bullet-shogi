@@ -2198,10 +2198,6 @@ fn main() {
                         "l3w",
                         Ranger21Params { clip: Some((-output_clip, output_clip)), ..base_params },
                     );
-                    trainer.optimiser.set_params_for_weight(
-                        "l3b",
-                        Ranger21Params { norm_loss_factor: 1.0e-4, norm_loss_repetitions: 9, ..base_params },
-                    );
 
                     maybe_run_or_quantise!(trainer);
                 }
