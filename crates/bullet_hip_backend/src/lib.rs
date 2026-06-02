@@ -4,15 +4,15 @@ mod matmul;
 pub mod sparse;
 
 pub use backend::ExecutionContext;
-use backend::{Buffer, bindings, ops, util};
+use backend::{bindings, ops, util, Buffer};
 
 use acyclib::{
     device::{
-        Device, DeviceBuffer, OperationError,
         operation::{
             AdamConfig, BaseOperations, BlasOperations, CoreDeviceOps, DiffableFromOutput, GemmConfig, SparseAffineOps,
         },
         tensor::{self, Shape},
+        Device, DeviceBuffer, OperationError,
     },
     graph::ir::BackendMarker,
 };
@@ -33,13 +33,21 @@ pub enum DeviceError {
 
 impl From<bindings::cublasStatus_t> for Result<(), DeviceError> {
     fn from(value: bindings::cublasStatus_t) -> Self {
-        if value == bindings::CUBLAS_SUCCESS { Ok(()) } else { Err(DeviceError::Cublas(value)) }
+        if value == bindings::CUBLAS_SUCCESS {
+            Ok(())
+        } else {
+            Err(DeviceError::Cublas(value))
+        }
     }
 }
 
 impl From<bindings::cudaError_t> for Result<(), DeviceError> {
     fn from(value: bindings::cudaError_t) -> Self {
-        if value == bindings::SUCCESS { Ok(()) } else { Err(DeviceError::Cuda(value)) }
+        if value == bindings::SUCCESS {
+            Ok(())
+        } else {
+            Err(DeviceError::Cuda(value))
+        }
     }
 }
 
@@ -268,6 +276,19 @@ impl BaseOperations for Buffer<f32> {
 
     fn clip(&mut self, size: usize, min: f32, max: f32) -> Result<(), Self::BaseError> {
         dense::clip(size, self, min, max)
+    }
+
+    fn clip_with_repeated_offset(
+        &mut self,
+        rows: usize,
+        cols: usize,
+        offset: &Self,
+        offset_rows: usize,
+        offset_cols: usize,
+        min: f32,
+        max: f32,
+    ) -> Result<(), Self::BaseError> {
+        dense::clip_with_repeated_offset(rows, cols, self, offset, offset_rows, offset_cols, min, max)
     }
 }
 

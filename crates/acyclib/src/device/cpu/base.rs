@@ -280,6 +280,27 @@ impl BaseOperations for CpuBuffer<f32> {
         Ok(())
     }
 
+    fn clip_with_repeated_offset(
+        &mut self,
+        rows: usize,
+        cols: usize,
+        offset: &Self,
+        offset_rows: usize,
+        offset_cols: usize,
+        min: f32,
+        max: f32,
+    ) -> Result<(), Self::BaseError> {
+        for col in 0..cols {
+            for row in 0..rows {
+                let idx = col * rows + row;
+                let shared = offset.buf[(col % offset_cols) * offset_rows + (row % offset_rows)];
+                self.buf[idx] = (self.buf[idx] + shared).clamp(min, max) - shared;
+            }
+        }
+
+        Ok(())
+    }
+
     fn adam(
         &mut self,
         config: &AdamConfig,

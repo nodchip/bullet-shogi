@@ -1,6 +1,7 @@
 pub mod adam;
 pub mod clip;
 pub mod decay;
+pub mod nnue_clip;
 pub mod radam;
 pub mod ranger;
 pub mod ranger21;
@@ -396,5 +397,22 @@ mod tests {
         let actual = dense_values(&weights)[0];
 
         assert!((actual - expected).abs() < 2.0e-7, "{actual} != {expected}");
+    }
+
+    #[test]
+    fn clip_with_repeated_offset_keeps_effective_weights_in_range() {
+        let device = Arc::new(CpuThread);
+        let mut weights = DenseMatrix::zeroed(device.clone(), 8, None).unwrap();
+        weights.load_from_slice(None, &[2.0, -2.0, 0.25, -0.25, 0.75, -0.75, 1.5, -1.5]).unwrap();
+        let mut shared = DenseMatrix::zeroed(device.clone(), 4, None).unwrap();
+        shared.load_from_slice(None, &[0.5, -0.25, 0.25, -0.5]).unwrap();
+
+        weights.clip_with_repeated_offset(4, 2, &shared, 2, 2, -1.0, 1.0).unwrap();
+
+        let actual = dense_values(&weights);
+        let expected = [0.5, -0.75, 0.25, -0.25, 0.75, -0.5, 0.75, -0.5];
+        for (actual, expected) in actual.iter().zip(expected) {
+            assert!((actual - expected).abs() < 1.0e-7, "{actual} != {expected}");
+        }
     }
 }

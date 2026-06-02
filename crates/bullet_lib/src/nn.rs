@@ -31,6 +31,7 @@ pub mod optimiser {
     pub type Ranger21Optimiser = optimiser::ranger21::Ranger21<ExecutionContext>;
     pub use optimiser::{
         adam::AdamWParams,
+        nnue_clip::NnuePytorchClipping,
         ranger::RangerParams,
         ranger21::{NormLossPlacement, Ranger21Params},
         Optimiser,

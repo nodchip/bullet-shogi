@@ -411,6 +411,37 @@ impl BaseOperations for CudaBuffer<f32> {
         Ok(())
     }
 
+    fn clip_with_repeated_offset(
+        &mut self,
+        rows: usize,
+        cols: usize,
+        offset: &Self,
+        offset_rows: usize,
+        offset_cols: usize,
+        min: f32,
+        max: f32,
+    ) -> Result<(), Self::BaseError> {
+        let func = self.device.module().load_function("ClipWithRepeatedOffsetKernel").map_err(CudaError::Driver)?;
+
+        unsafe {
+            self.device
+                .stream()
+                .launch_builder(&func)
+                .arg(&(rows as i32))
+                .arg(&(cols as i32))
+                .arg(&mut self.buf.slice_mut(0..rows * cols))
+                .arg(&offset.buf.slice(0..offset_rows * offset_cols))
+                .arg(&(offset_rows as i32))
+                .arg(&(offset_cols as i32))
+                .arg(&min)
+                .arg(&max)
+                .launch(CudaDevice::elementwise_launch_params(rows * cols, 1024))
+                .map_err(CudaError::Driver)?;
+        }
+
+        Ok(())
+    }
+
     fn adam(
         &mut self,
         config: &AdamConfig,

@@ -120,6 +120,17 @@ pub trait BaseOperations {
 
     fn clip(&mut self, size: usize, min: f32, max: f32) -> Result<(), Self::BaseError>;
 
+    fn clip_with_repeated_offset(
+        &mut self,
+        rows: usize,
+        cols: usize,
+        offset: &Self,
+        offset_rows: usize,
+        offset_cols: usize,
+        min: f32,
+        max: f32,
+    ) -> Result<(), Self::BaseError>;
+
     fn adam(
         &mut self,
         config: &AdamConfig,

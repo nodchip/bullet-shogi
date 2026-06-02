@@ -94,6 +94,27 @@ __global__ void ClipKernel(const int32_t size, float* params, const float min_we
     }
 }
 
+__global__ void ClipWithRepeatedOffsetKernel(
+    const int32_t rows,
+    const int32_t cols,
+    float* params,
+    const float* offset,
+    const int32_t offset_rows,
+    const int32_t offset_cols,
+    const float min_weight,
+    const float max_weight) {
+    const int32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    const int32_t size = rows * cols;
+
+    if (tid < size)
+    {
+        const int32_t row = tid % rows;
+        const int32_t col = tid / rows;
+        const float shared = offset[(col % offset_cols) * offset_rows + (row % offset_rows)];
+        params[tid] = min(max(params[tid] + shared, min_weight), max_weight) - shared;
+    }
+}
+
 extern "C" void Adam(
     const size_t size,
     const float beta1,
@@ -136,4 +157,19 @@ extern "C" void clip(const size_t size, float* params, const float min_weight, c
     const size_t float4_size = (size + 3) / 4;
     const size_t blocks = (float4_size + threads - 1) / threads;
     ClipKernel<<<blocks, threads>>>(size, params, min_weight, max_weight);
+}
+
+extern "C" void clip_with_repeated_offset(
+    const size_t rows,
+    const size_t cols,
+    float* params,
+    const float* offset,
+    const size_t offset_rows,
+    const size_t offset_cols,
+    const float min_weight,
+    const float max_weight) {
+    const size_t threads = 1024;
+    const size_t size = rows * cols;
+    const size_t blocks = (size + threads - 1) / threads;
+    ClipWithRepeatedOffsetKernel<<<blocks, threads>>>(rows, cols, params, offset, offset_rows, offset_cols, min_weight, max_weight);
 }

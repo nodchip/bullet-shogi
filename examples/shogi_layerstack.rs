@@ -53,7 +53,9 @@ use bullet_lib::{
         SHOGI_PROGRESS_GIKOU_LITE_NUM_FEATURES,
     },
     nn::{
-        optimiser::{self, AdamWParams, NormLossPlacement, RAdamParams, Ranger21Params, RangerParams},
+        optimiser::{
+            self, AdamWParams, NnuePytorchClipping, NormLossPlacement, RAdamParams, Ranger21Params, RangerParams,
+        },
         Affine, BackendMarker, InitSettings, NetworkBuilderNode, Shape,
     },
     trainer::{
@@ -1922,6 +1924,7 @@ fn main() {
     let l1_effective_c = l1_effective;
     let l2_out_c = l2_out;
     let l2_in_c = l2_in;
+    let l1_in_total_c = ft_out_c + hand_count_dense_dims;
     let use_psqt = args.psqt;
     let bucket_impl = match args.bucket_mode {
         BucketMode::Progress8KPAbs => match progress_bucket {
@@ -2000,7 +2003,7 @@ fn main() {
                 };
 
                 // L1 入力次元: FT 出力 + （HandCount Dense 有効時は +14）
-                let l1_in_total = ft_out_c + hand_count_dense_dims;
+                let l1_in_total = l1_in_total_c;
 
                 // LayerStack layers:
                 // - 既定: l1 は bucket-specific delta をゼロ初期化し、l1f を共有成分として乱数初期化する。
@@ -2186,14 +2189,6 @@ fn main() {
 
                     let hidden_clip = nnue_pytorch_hidden_weight_clip();
                     let output_clip = nnue_pytorch_output_weight_clip(args.scale);
-                    trainer.optimiser.set_params_for_weight(
-                        "l1w",
-                        Ranger21Params { clip: Some((-hidden_clip, hidden_clip)), ..base_params },
-                    );
-                    trainer.optimiser.set_params_for_weight(
-                        "l2w",
-                        Ranger21Params { clip: Some((-hidden_clip, hidden_clip)), ..base_params },
-                    );
                     let norm_before = Ranger21Params {
                         norm_loss_factor: 1.0e-4,
                         norm_loss_placement: NormLossPlacement::Before,
@@ -2208,10 +2203,15 @@ fn main() {
                     for id in ["l0b", "l1fw", "l1fb", "l1w", "l1b", "l2w", "l2b"] {
                         trainer.optimiser.set_params_for_weight(id, norm_after);
                     }
-                    trainer.optimiser.set_params_for_weight(
-                        "l3w",
-                        Ranger21Params { clip: Some((-output_clip, output_clip)), ..norm_after },
-                    );
+                    trainer.optimiser.set_params_for_weight("l3w", norm_after);
+                    trainer.optimiser.add_post_update(NnuePytorchClipping::new(
+                        NUM_BUCKETS * l1_out_c,
+                        l1_in_total_c,
+                        l1_out_c,
+                        ft_out_c,
+                        hidden_clip,
+                        output_clip,
+                    ));
 
                     maybe_run_or_quantise!(trainer);
                 }

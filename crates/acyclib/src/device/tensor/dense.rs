@@ -1,6 +1,6 @@
 use std::{fmt, num::NonZeroUsize, sync::Arc};
 
-use crate::device::{Device, DeviceBuffer, OperationError, operation::BaseOperations, tensor::rng};
+use crate::device::{operation::BaseOperations, tensor::rng, Device, DeviceBuffer, OperationError};
 
 pub struct DenseMatrix<D: Device> {
     pub buf: D::BufferF32,
@@ -55,6 +55,24 @@ impl<D: Device> DenseMatrix<D> {
 
     pub fn clamp(&mut self, min: f32, max: f32) -> Result<(), OperationError<D::DeviceError>> {
         self.buf.clip(self.size(), min, max)?;
+        Ok(())
+    }
+
+    pub fn clip_with_repeated_offset(
+        &mut self,
+        rows: usize,
+        cols: usize,
+        offset: &Self,
+        offset_rows: usize,
+        offset_cols: usize,
+        min: f32,
+        max: f32,
+    ) -> Result<(), OperationError<D::DeviceError>> {
+        if self.size() != rows * cols || offset.size() != offset_rows * offset_cols {
+            return Err(OperationError::IndexOutOfBounds);
+        }
+
+        self.buf.clip_with_repeated_offset(rows, cols, &offset.buf, offset_rows, offset_cols, min, max)?;
         Ok(())
     }
 

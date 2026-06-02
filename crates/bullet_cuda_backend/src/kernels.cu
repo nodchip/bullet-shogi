@@ -292,6 +292,27 @@ BULLET_KERNEL ClipKernel(const int size, float* params, const float min_weight, 
     }
 }
 
+BULLET_KERNEL ClipWithRepeatedOffsetKernel(
+    const int rows,
+    const int cols,
+    float* params,
+    const float* offset,
+    const int offset_rows,
+    const int offset_cols,
+    const float min_weight,
+    const float max_weight) {
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    const int size = rows * cols;
+
+    if (tid < size)
+    {
+        const int row = tid % rows;
+        const int col = tid / rows;
+        const float shared = offset[(col % offset_cols) * offset_rows + (row % offset_rows)];
+        params[tid] = min(max(params[tid] + shared, min_weight), max_weight) - shared;
+    }
+}
+
 BULLET_KERNEL PairwiseMulKernel(
     const int stride,
     const int output_size,
