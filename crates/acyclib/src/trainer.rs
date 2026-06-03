@@ -132,6 +132,7 @@ impl<D: Device, G: GraphLike<D>, O: OptimiserState<D>, S> Trainer<D, G, O, S> {
                 gradient_factor: f32,
                 learning_rate: f32,
             ) -> Result<(), OperationError<D::DeviceError>> {
+                optim.run_batch_start_updates()?;
                 optim.graph.execute_fn("zero_grads")?;
                 optim.graph.execute_fn("forward")?;
                 optim.graph.execute_fn("backward")?;

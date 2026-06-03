@@ -44,6 +44,7 @@ pub struct Optimiser<D: Device, G: GraphLike<D>, S: OptimiserState<D>> {
     phantom: PhantomData<D>,
     pub graph: G,
     pub state: HashMap<String, S>,
+    batch_start_update: Vec<Box<dyn AdditionalUpdate<D>>>,
     pre_update: Vec<Box<dyn AdditionalUpdate<D>>>,
     post_update: Vec<Box<dyn AdditionalUpdate<D>>>,
 }
@@ -71,7 +72,26 @@ impl<D: Device, G: GraphLike<D>, S: OptimiserState<D>> Optimiser<D, G, S> {
             assert!(old.is_none());
         }
 
-        Ok(Self { phantom: PhantomData, graph, state, pre_update: Vec::new(), post_update: Vec::new() })
+        Ok(Self {
+            phantom: PhantomData,
+            graph,
+            state,
+            batch_start_update: Vec::new(),
+            pre_update: Vec::new(),
+            post_update: Vec::new(),
+        })
+    }
+
+    pub fn add_batch_start_update(&mut self, additional: impl AdditionalUpdate<D> + 'static) {
+        self.batch_start_update.push(Box::new(additional));
+    }
+
+    pub fn run_batch_start_updates(&mut self) -> Result<(), OperationError<D::DeviceError>> {
+        for additional in &mut self.batch_start_update {
+            additional.apply_update(self.graph.primary_mut())?;
+        }
+
+        Ok(())
     }
 
     pub fn add_pre_update(&mut self, additional: impl AdditionalUpdate<D> + 'static) {
@@ -223,12 +243,38 @@ where
 mod tests {
     use std::sync::Arc;
 
-    use crate::device::{cpu::CpuThread, tensor::DenseMatrix};
+    use crate::{
+        device::{
+            cpu::CpuThread,
+            tensor::{DenseMatrix, Shape},
+            OperationError,
+        },
+        graph::{
+            builder::{GraphBuilder, InitSettings},
+            Graph,
+        },
+    };
 
     use super::{
+        adam::{AdamW, AdamWParams},
         ranger21::{NormLossPlacement, Ranger21, Ranger21Params},
-        OptimiserState,
+        AdditionalUpdate, Optimiser, OptimiserState,
     };
+
+    struct SetWeightUpdate {
+        id: &'static str,
+        value: f32,
+    }
+
+    impl AdditionalUpdate<CpuThread> for SetWeightUpdate {
+        fn apply_update(
+            &mut self,
+            graph: &mut Graph<CpuThread>,
+        ) -> Result<(), OperationError<<CpuThread as crate::device::Device>::DeviceError>> {
+            graph.get_weights(self.id).dense_mut().set_to(self.value)?;
+            Ok(())
+        }
+    }
 
     fn dense_values(weights: &DenseMatrix<CpuThread>) -> Vec<f32> {
         let mut values = vec![0.0; weights.size()];
@@ -277,6 +323,21 @@ mod tests {
         let unit_norm = weight.abs();
         let correction = 2.0 * params.norm_loss_factor * (1.0 - 1.0 / (unit_norm + params.eps));
         weight * (1.0 - learning_rate * correction)
+    }
+
+    #[test]
+    fn optimiser_runs_batch_start_updates_on_request_only() {
+        let builder = GraphBuilder::default();
+        builder.new_weights("w", Shape::new(1, 1), InitSettings::Zeroed);
+        let graph = builder.build(CpuThread);
+        let mut optimiser: Optimiser<CpuThread, _, AdamW<CpuThread>> =
+            Optimiser::new(graph, AdamWParams::default()).unwrap();
+
+        optimiser.add_batch_start_update(SetWeightUpdate { id: "w", value: 0.5 });
+        assert_eq!(dense_values(&optimiser.graph.get_weights("w").dense()), vec![0.0]);
+
+        optimiser.run_batch_start_updates().unwrap();
+        assert_eq!(dense_values(&optimiser.graph.get_weights("w").dense()), vec![0.5]);
     }
 
     #[test]

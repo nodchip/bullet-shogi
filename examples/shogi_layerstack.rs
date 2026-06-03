@@ -315,6 +315,11 @@ struct Args {
     #[arg(long, default_value_t = false)]
     nnue_pytorch_init: bool,
 
+    /// Apply nnue-pytorch-compatible weight clipping before each forward pass.
+    /// Without this flag, Ranger21 keeps the previous post-update clipping timing.
+    #[arg(long, default_value_t = false)]
+    nnue_pytorch_clip_at_batch_start: bool,
+
     /// Enable Threat concatenated input
     #[arg(long, default_value_t = false)]
     threat: bool,
@@ -731,6 +736,7 @@ struct ExperimentParams {
     weight_decay: f32,
     win_rate_model: bool,
     nnue_pytorch_init: bool,
+    nnue_pytorch_clip_at_batch_start: bool,
     optimizer: String,
     qa: i16,
     qb: i16,
@@ -1741,6 +1747,10 @@ fn main() {
     println!("FV_SCALE: {} (QA={}, QB={}, scale={})", fv_scale, QA, QB, args.scale);
     println!("Optimizer: {}", optimizer_name);
     println!("Weight decay: {}", args.weight_decay);
+    println!(
+        "nnue-pytorch clipping timing: {}",
+        if args.nnue_pytorch_clip_at_batch_start { "batch-start" } else { "post-update" }
+    );
     println!("Win rate model: {}", if args.win_rate_model { "enabled" } else { "disabled" });
     if let Some(in_scaling) = args.wrm_in_scaling {
         println!("WRM in_scaling: {} nnue2score: {} (network output WRM enabled)", in_scaling, args.wrm_nnue2score);
@@ -1817,6 +1827,7 @@ fn main() {
         weight_decay: args.weight_decay,
         win_rate_model: args.win_rate_model,
         nnue_pytorch_init: args.nnue_pytorch_init,
+        nnue_pytorch_clip_at_batch_start: args.nnue_pytorch_clip_at_batch_start,
         optimizer: optimizer_name.to_string(),
         qa: QA,
         qb: QB,
@@ -2204,14 +2215,19 @@ fn main() {
                         trainer.optimiser.set_params_for_weight(id, norm_after);
                     }
                     trainer.optimiser.set_params_for_weight("l3w", norm_after);
-                    trainer.optimiser.add_post_update(NnuePytorchClipping::new(
+                    let clipping = NnuePytorchClipping::new(
                         NUM_BUCKETS * l1_out_c,
                         l1_in_total_c,
                         l1_out_c,
                         ft_out_c,
                         hidden_clip,
                         output_clip,
-                    ));
+                    );
+                    if args.nnue_pytorch_clip_at_batch_start {
+                        trainer.optimiser.add_batch_start_update(clipping);
+                    } else {
+                        trainer.optimiser.add_post_update(clipping);
+                    }
 
                     maybe_run_or_quantise!(trainer);
                 }
@@ -2324,6 +2340,13 @@ mod tests {
         let args = Args::parse_from(["shogi_layerstack", "--nnue-pytorch-init"]);
 
         assert!(args.nnue_pytorch_init);
+    }
+
+    #[test]
+    fn test_nnue_pytorch_clip_at_batch_start_flag_is_parsed() {
+        let args = Args::parse_from(["shogi_layerstack", "--nnue-pytorch-clip-at-batch-start"]);
+
+        assert!(args.nnue_pytorch_clip_at_batch_start);
     }
 
     #[test]
