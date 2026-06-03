@@ -1167,14 +1167,17 @@ fn layerstack_format_constants(
                 architecture: arch_desc,
             }
         }
-        LayerStackOutputFormat::TanukiSfnnwoP1536 => LayerStackFormatConstants {
-            nnue_version: 0x7AF32F16,
-            network_hash: 0x3c203b32,
-            ft_hash: 0x5f134ab8,
-            fc_hash: 0x6333718A,
-            serialized_buckets: 8,
-            architecture: "Network trained with https://github.com/official-stockfish/nnue-pytorch".to_string(),
-        },
+        LayerStackOutputFormat::TanukiSfnnwoP1536 => {
+            let _ = (ft_out, l1_out, l2_out, arch_desc);
+            LayerStackFormatConstants {
+                nnue_version: 0x7AF32F16,
+                network_hash: 0x3c203b32,
+                ft_hash: 0x5f134ab8,
+                fc_hash: 0x6333718A,
+                serialized_buckets: 8,
+                architecture: "Network trained with https://github.com/official-stockfish/nnue-pytorch".to_string(),
+            }
+        }
     }
 }
 
@@ -1198,9 +1201,9 @@ fn validate_layerstack_output_format(
     if input_size != halfka_dim {
         return Err("tanuki-sfnnwop1536 output supports only plain HalfKA_hm input".to_string());
     }
-    if (ft_out, l1_out, l2_out) != (1536, 16, 32) {
+    if ft_out == 0 || l1_out < 2 || l2_out == 0 {
         return Err(format!(
-            "tanuki-sfnnwop1536 output requires --l0 1536 --l1 16 --l2 32 (got --l0 {ft_out} --l1 {l1_out} --l2 {l2_out})"
+            "tanuki-sfnnwop1536 output requires --l0 >= 1 --l1 >= 2 --l2 >= 1 (got --l0 {ft_out} --l1 {l1_out} --l2 {l2_out})"
         ));
     }
     if bucket_mode != BucketMode::Progress8KPAbs {
@@ -2415,6 +2418,24 @@ mod tests {
     }
 
     #[test]
+    fn test_tanuki_sfnnwop1536_custom_layer_sizes_keep_hakubishin_hashes() {
+        let format = layerstack_format_constants(
+            LayerStackOutputFormat::TanukiSfnnwoP1536,
+            1536,
+            8,
+            32,
+            "custom architecture".to_string(),
+        );
+
+        assert_eq!(format.nnue_version, 0x7AF32F16);
+        assert_eq!(format.network_hash, 0x3c203b32);
+        assert_eq!(format.ft_hash, 0x5f134ab8);
+        assert_eq!(format.fc_hash, 0x6333718A);
+        assert_eq!(format.serialized_buckets, 8);
+        assert_eq!(format.architecture, "Network trained with https://github.com/official-stockfish/nnue-pytorch");
+    }
+
+    #[test]
     fn test_tanuki_sfnnwop1536_requires_progress8kpabs_bucket_mode() {
         let result = validate_layerstack_output_format(
             LayerStackOutputFormat::TanukiSfnnwoP1536,
@@ -2431,6 +2452,44 @@ mod tests {
         );
 
         assert!(result.unwrap_err().contains("--bucket-mode progress8kpabs"));
+    }
+
+    #[test]
+    fn test_tanuki_sfnnwop1536_allows_custom_layer_sizes() {
+        let result = validate_layerstack_output_format(
+            LayerStackOutputFormat::TanukiSfnnwoP1536,
+            BucketMode::Progress8KPAbs,
+            ShogiHalfKA_hm.num_inputs(),
+            ShogiHalfKA_hm.num_inputs(),
+            1536,
+            8,
+            32,
+            false,
+            None,
+            false,
+            0,
+        );
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_tanuki_sfnnwop1536_rejects_l1_without_skip_neuron() {
+        let result = validate_layerstack_output_format(
+            LayerStackOutputFormat::TanukiSfnnwoP1536,
+            BucketMode::Progress8KPAbs,
+            ShogiHalfKA_hm.num_inputs(),
+            ShogiHalfKA_hm.num_inputs(),
+            1536,
+            1,
+            32,
+            false,
+            None,
+            false,
+            0,
+        );
+
+        assert!(result.unwrap_err().contains("--l1 >= 2"));
     }
 
     #[test]
